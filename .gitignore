@@ -1,0 +1,69 @@
+.venv/
+.testvenv/
+venv/
+env/
+
+# Python bytecode / packaging
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+build/
+dist/
+*.spec
+
+# Test / lint / type-check caches
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.pyright/
+.pytype/
+.ruff_cache/
+.hypothesis/
+
+# Local DevMesh install/runtime artifacts
+.devmesh-install.json
+*.pid
+*.log
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+runtime/
+
+# Local config / credentials / secrets
+.env
+.env.*
+!.env.example
+secrets.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# IDE/editor state
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+.cache/

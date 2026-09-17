@@ -1,0 +1,10 @@
+PyQt6>=6.8,<7
+fastapi>=0.116,<1
+uvicorn[standard]>=0.35,<1
+PyJWT>=2.10,<3
+argon2-cffi>=25,<26
+python-multipart>=0.0.20,<1
+websockets>=15,<16
+keyring>=25,<26
+mcp>=2.0,<3
+psutil>=7,<8

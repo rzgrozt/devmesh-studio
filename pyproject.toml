@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devmesh-studio"
+version = "1.1.0"
+description = "Local developer control plane that gives ChatGPT a full coding tool runtime over MCP."
+requires-python = ">=3.11"
+license = {text = "GPL-3.0-or-later"}
+authors = [{name = "DevMesh"}]
+dependencies = [
+  "PyQt6>=6.8,<7",
+  "fastapi>=0.116,<1",
+  "uvicorn[standard]>=0.35,<1",
+  "PyJWT>=2.10,<3",
+  "argon2-cffi>=25,<26",
+  "python-multipart>=0.0.20,<1",
+  "websockets>=15,<16",
+  "keyring>=25,<26",
+  "mcp>=2.0,<3",
+  "psutil>=7,<8",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=9,<10",
+  "httpx>=0.28,<1",
+]
+build = [
+  "pyinstaller>=6.16,<7",
+]
+
+[project.scripts]
+devmesh = "devmesh_studio.__main__:main"
+devmesh-server = "devmesh_studio.runtime.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["devmesh_studio*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
