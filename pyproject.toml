@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "devmesh-studio"
-version = "1.2.1"
+version = "1.2.2"
 description = "Local developer control plane that gives ChatGPT a full coding tool runtime over MCP."
 requires-python = ">=3.11"
 license = {text = "GPL-3.0-or-later"}
