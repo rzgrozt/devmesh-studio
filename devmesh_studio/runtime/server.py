@@ -38,6 +38,11 @@ async def healthz():
 
 @app.on_event("shutdown")
 async def shutdown_runtime():
+    # Stateful downstream MCPs (CUA, browser automation, etc.) may own child
+    # processes and application state. Close those workers before the gateway
+    # exits so restarts never leave orphaned runtimes behind.
+    await registry.mcp.close_all()
+
     # Language servers are child processes of the MCP runtime. Stop them
     # explicitly so restarting DevMesh never leaves orphaned LSP processes.
     registry.code.lsp.stop_all()

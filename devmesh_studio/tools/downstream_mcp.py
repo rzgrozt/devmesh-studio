@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import fnmatch
+import hashlib
 import inspect
+import json
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncIterator
 
 from .base import ToolContext
@@ -31,9 +34,210 @@ def _tool_allowed(tool_name: str, patterns: list[str] | tuple[str, ...] | set[st
     return any(pattern == "*" or fnmatch.fnmatchcase(tool_name, pattern) for pattern in patterns)
 
 
+def _server_fingerprint(server: dict[str, Any]) -> str:
+    """Fingerprint connection-relevant server configuration.
+
+    A changed command, URL, args, or environment must replace the existing worker.
+    The fingerprint is internal only and never exposes environment values.
+    """
+    payload = {
+        "id": server.get("id"),
+        "transport": server.get("transport"),
+        "command": server.get("command"),
+        "args": list(server.get("args", [])),
+        "url": server.get("url"),
+        "env": dict(server.get("env", {})),
+        "enabled": bool(server.get("enabled")),
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+class _PersistentMCPWorker:
+    """Own one long-lived downstream MCP runtime in a single asyncio task.
+
+    Stdio MCPs often keep application state in their process even though modern MCP
+    requests are protocol-level stateless. Keeping the child process and ClientSession
+    alive lets explicit application handles (browser contexts, CUA sessions, snapshot
+    tokens, etc.) survive across DevMesh mcp_call invocations.
+
+    The worker task owns both entry and exit of the MCP context managers. This avoids
+    crossing AnyIO cancel scopes between independent FastAPI request tasks.
+    """
+
+    def __init__(self, server: dict[str, Any]):
+        self.server = dict(server)
+        self.fingerprint = _server_fingerprint(server)
+        self._queue: asyncio.Queue[tuple[str, tuple[Any, ...], asyncio.Future[Any]]] = asyncio.Queue()
+        self._task: asyncio.Task[None] | None = None
+        self._closed = False
+        self._fatal_error: Exception | None = None
+
+    @property
+    def usable(self) -> bool:
+        return not self._closed and (self._task is None or not self._task.done())
+
+    def _ensure_started(self) -> None:
+        if self._closed:
+            raise RuntimeError("downstream MCP worker is closed")
+        if self._task is None:
+            name = self.server.get("name") or self.server.get("id") or "mcp"
+            self._task = asyncio.create_task(self._run(), name=f"devmesh-mcp-{name}")
+
+    async def request(self, operation: str, *payload: Any) -> Any:
+        self._ensure_started()
+        if self._task is not None and self._task.done():
+            detail = f": {self._fatal_error}" if self._fatal_error else ""
+            raise RuntimeError(f"downstream MCP worker stopped{detail}")
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[Any] = loop.create_future()
+        await self._queue.put((operation, payload, future))
+        return await future
+
+    async def close(self) -> None:
+        task = self._task
+        if task is None:
+            self._closed = True
+            return
+        if task.done():
+            self._closed = True
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+            return
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[Any] = loop.create_future()
+        await self._queue.put(("__close__", (), future))
+        with suppress(asyncio.CancelledError, Exception):
+            await future
+        with suppress(asyncio.CancelledError, Exception):
+            await task
+        self._closed = True
+
+    def _fail_pending(self, exc: Exception) -> None:
+        while True:
+            try:
+                _, _, future = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if not future.done():
+                future.set_exception(exc)
+
+    @asynccontextmanager
+    async def _session(self) -> AsyncIterator[Any]:
+        try:
+            from mcp import ClientSession, StdioServerParameters
+            from mcp.client.stdio import stdio_client
+        except ImportError as exc:
+            raise RuntimeError("mcp Python package is required") from exc
+
+        server = self.server
+        if server["transport"] == "stdio":
+            command = server.get("command")
+            if not command:
+                raise ValueError("stdio MCP requires command")
+            child_env = os.environ.copy()
+            child_env.update({str(k): str(v) for k, v in server.get("env", {}).items()})
+            params = StdioServerParameters(
+                command=command,
+                args=list(server.get("args", [])),
+                env=child_env,
+            )
+            async with stdio_client(params) as streams:
+                async with ClientSession(streams[0], streams[1]) as session:
+                    await session.initialize()
+                    yield session
+            return
+
+        url = server.get("url") or ""
+        if not url.startswith(("https://", "http://127.0.0.1", "http://localhost")):
+            raise ValueError("HTTP MCP URL must use HTTPS or loopback HTTP")
+
+        from mcp.client.streamable_http import streamable_http_client
+
+        signature = inspect.signature(streamable_http_client)
+        kwargs: dict[str, Any] = {}
+        if "timeout" in signature.parameters:
+            kwargs["timeout"] = 30.0
+        async with streamable_http_client(url, **kwargs) as streams:
+            async with ClientSession(streams[0], streams[1]) as session:
+                await session.initialize()
+                yield session
+
+    async def _run(self) -> None:
+        try:
+            async with self._session() as session:
+                while True:
+                    operation, payload, future = await self._queue.get()
+                    if operation == "__close__":
+                        if not future.done():
+                            future.set_result(None)
+                        break
+
+                    try:
+                        if operation == "list_tools":
+                            result = await session.list_tools()
+                        elif operation == "call_tool":
+                            tool_name, arguments = payload
+                            result = await session.call_tool(tool_name, arguments)
+                        else:
+                            raise ValueError(f"unknown downstream MCP worker operation: {operation}")
+                    except Exception as exc:
+                        # MCP tool failures are normally returned as CallToolResult(isError).
+                        # An exception here is therefore treated as a transport/protocol
+                        # failure: fail this request and tear down the worker so the next
+                        # DevMesh call gets a clean downstream runtime.
+                        if not future.done():
+                            future.set_exception(exc)
+                        raise
+                    else:
+                        if not future.done():
+                            future.set_result(result)
+
+        except asyncio.CancelledError:
+            exc = RuntimeError("downstream MCP worker cancelled")
+            self._fatal_error = exc
+            self._fail_pending(exc)
+            raise
+        except Exception as exc:
+            self._fatal_error = exc
+            self._fail_pending(exc)
+        finally:
+            self._closed = True
+
+
 class DownstreamMCPTools:
     def __init__(self, ctx: ToolContext):
         self.ctx = ctx
+        self._workers: dict[str, _PersistentMCPWorker] = {}
+        self._workers_lock: asyncio.Lock | None = None
+
+    def _lock(self) -> asyncio.Lock:
+        if self._workers_lock is None:
+            self._workers_lock = asyncio.Lock()
+        return self._workers_lock
+
+    async def _worker_for(self, server: dict[str, Any]) -> _PersistentMCPWorker:
+        key = str(server.get("id") or server.get("name"))
+        fingerprint = _server_fingerprint(server)
+        async with self._lock():
+            worker = self._workers.get(key)
+            if worker is not None and (worker.fingerprint != fingerprint or not worker.usable):
+                await worker.close()
+                self._workers.pop(key, None)
+                worker = None
+            if worker is None:
+                worker = _PersistentMCPWorker(server)
+                self._workers[key] = worker
+            return worker
+
+    async def close_all(self) -> None:
+        """Stop every downstream MCP child/session owned by this gateway."""
+        async with self._lock():
+            workers = list(self._workers.values())
+            self._workers.clear()
+        for worker in workers:
+            await worker.close()
 
     def list_servers(self, actor: str) -> dict[str, Any]:
         args: dict[str, Any] = {}
@@ -47,75 +251,52 @@ class DownstreamMCPTools:
                 safe.append(item)
             return {"servers": safe}
 
-    @asynccontextmanager
-    async def _session(self, server: dict[str, Any]) -> AsyncIterator[Any]:
-        try:
-            from mcp import ClientSession, StdioServerParameters
-            from mcp.client.stdio import stdio_client
-        except ImportError as exc:
-            raise RuntimeError("mcp Python package is required") from exc
-
-        if server["transport"] == "stdio":
-            command = server.get("command")
-            if not command:
-                raise ValueError("stdio MCP requires command")
-            child_env = os.environ.copy()
-            child_env.update({str(k): str(v) for k, v in server.get("env", {}).items()})
-            params = StdioServerParameters(command=command, args=list(server.get("args", [])), env=child_env)
-            async with stdio_client(params) as streams:
-                async with ClientSession(streams[0], streams[1]) as session:
-                    await session.initialize()
-                    yield session
-            return
-
-        url = server.get("url") or ""
-        if not url.startswith(("https://", "http://127.0.0.1", "http://localhost")):
-            raise ValueError("HTTP MCP URL must use HTTPS or loopback HTTP")
-        from mcp.client.streamable_http import streamable_http_client
-        signature = inspect.signature(streamable_http_client)
-        kwargs: dict[str, Any] = {}
-        # Avoid silently sending credentials; authenticated downstream MCPs can
-        # use env-backed config in future revisions.
-        if "timeout" in signature.parameters:
-            kwargs["timeout"] = 30.0
-        async with streamable_http_client(url, **kwargs) as streams:
-            async with ClientSession(streams[0], streams[1]) as session:
-                await session.initialize()
-                yield session
-
     async def list_tools(self, actor: str, server_id: int | str) -> dict[str, Any]:
         server = self.ctx.storage.get_mcp_server(server_id)
         if not server or not server["enabled"]:
             raise KeyError(f"unknown/disabled MCP server: {server_id}")
         args = {"server_id": server_id}
         with self.ctx.record(actor, None, "mcp_tools", str(server_id), args):
-            async with self._session(server) as session:
-                page = await session.list_tools()
-                allowed_patterns = list(server.get("allowed_tools", []))
-                tools = []
-                for tool in page.tools:
-                    raw = _dump(tool)
-                    name = raw.get("name")
-                    tools.append({
-                        "name": name,
-                        "description": raw.get("description"),
-                        "inputSchema": raw.get("inputSchema") or raw.get("input_schema") or {},
-                        "allowed": bool(name and _tool_allowed(name, allowed_patterns)),
-                    })
-                return {"server": server["name"], "tools": tools}
+            worker = await self._worker_for(server)
+            page = await worker.request("list_tools")
+            allowed_patterns = list(server.get("allowed_tools", []))
+            tools = []
+            for tool in page.tools:
+                raw = _dump(tool)
+                name = raw.get("name")
+                tools.append({
+                    "name": name,
+                    "description": raw.get("description"),
+                    "inputSchema": raw.get("inputSchema") or raw.get("input_schema") or {},
+                    "allowed": bool(name and _tool_allowed(name, allowed_patterns)),
+                })
+            return {"server": server["name"], "tools": tools}
 
-    async def call(self, actor: str, repo_id: int | None, server_id: int | str, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def call(
+        self,
+        actor: str,
+        repo_id: int | None,
+        server_id: int | str,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
         server = self.ctx.storage.get_mcp_server(server_id)
         if not server or not server["enabled"]:
             raise KeyError(f"unknown/disabled MCP server: {server_id}")
         if not _tool_allowed(tool_name, list(server.get("allowed_tools", []))):
             raise PermissionError(f"downstream MCP tool is not allowlisted: {server['name']}.{tool_name}")
+
         args = {"server_id": server_id, "tool_name": tool_name, "arguments": arguments}
-        with self.ctx.record(actor, repo_id, "mcp_call", f"{server['name']}.{tool_name}", args):
-            if repo_id is not None:
-                self.ctx.permissions.require(actor, repo_id, "mcp", f"{server['name']}.{tool_name}", args, suggested_pattern=f"{server['name']}.*")
-            else:
-                self.ctx.permissions.require(actor, None, "mcp", f"{server['name']}.{tool_name}", args, suggested_pattern=f"{server['name']}.*")
-            async with self._session(server) as session:
-                result = await session.call_tool(tool_name, arguments)
-                return _dump(result)
+        resource = f"{server['name']}.{tool_name}"
+        with self.ctx.record(actor, repo_id, "mcp_call", resource, args):
+            self.ctx.permissions.require(
+                actor,
+                repo_id,
+                "mcp",
+                resource,
+                args,
+                suggested_pattern=f"{server['name']}.*",
+            )
+            worker = await self._worker_for(server)
+            result = await worker.request("call_tool", tool_name, arguments)
+            return _dump(result)
