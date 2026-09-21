@@ -150,6 +150,8 @@ def test_oauth_discovery_advertises_path_aware_resource_and_dcr(tmp_path):
     metadata = client.get("/.well-known/oauth-authorization-server").json()
     assert resource["resource"] == "https://devmesh.example.test/mcp"
     assert metadata["registration_endpoint"] == "https://devmesh.example.test/oauth/register"
+    assert metadata["code_challenge_methods_supported"] == ["S256"]
+    assert metadata["token_endpoint_auth_methods_supported"] == ["none"]
 
     registered = client.post("/oauth/register", json={
         "client_name": "Windows MCP host",
@@ -159,6 +161,16 @@ def test_oauth_discovery_advertises_path_aware_resource_and_dcr(tmp_path):
     assert registered.status_code == 201
     assert registered.json()["client_id"].startswith("dvm_")
     assert isinstance(registered.json()["client_id_issued_at"], int)
+
+
+def test_oauth_dcr_routes_are_platform_neutral(tmp_path):
+    storage = Storage(tmp_path / "routes.db")
+    storage.set_setting("public_url", "https://devmesh.example.test")
+    app = FastAPI(); app.include_router(create_auth_router(storage))
+    paths = app.openapi()["paths"]
+    assert "post" in paths["/oauth/register"]
+    assert "get" in paths["/oauth/authorize"]
+    assert "post" in paths["/oauth/token"]
 
 
 def test_dcr_rejects_lookalike_loopback_hostname(tmp_path):

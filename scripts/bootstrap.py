@@ -400,6 +400,9 @@ def build_windows(source: Path, *, dry_run: bool = False) -> tuple[Path, Path]:
     server = dist / "devmesh-server.exe"
     if not gui.exists() or not server.exists():
         raise RuntimeError("PyInstaller completed without producing both required executables.")
+    # Run the frozen gateway itself so a Windows packaging regression cannot
+    # silently ship without the DCR/PKCE routes that exist in the source tree.
+    _run([str(server), "--oauth-self-test"], cwd=source)
     print(f"[DevMesh] Windows GUI: {gui}")
     print(f"[DevMesh] Windows gateway: {server}")
     return gui, server

@@ -70,6 +70,28 @@ def verify_access(storage: Storage, token: str) -> dict:
     return jwt.decode(token, jwt_secret(), algorithms=["HS256"], audience=origin + "/mcp", issuer=origin)
 
 
+def authorization_server_metadata(storage: Storage) -> dict:
+    """Return the RFC 8414 metadata used by every platform build.
+
+    Keep this platform-neutral. Windows must advertise the exact same
+    DCR + PKCE capabilities as Linux/macOS; packaging code can use this helper
+    for a frozen-binary smoke test.
+    """
+    origin = public_url(storage)
+    return {
+        "issuer": origin,
+        "authorization_endpoint": origin + "/oauth/authorize",
+        "token_endpoint": origin + "/oauth/token",
+        "registration_endpoint": origin + "/oauth/register",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "token_endpoint_auth_methods_supported": ["none"],
+        "code_challenge_methods_supported": ["S256"],
+        "scopes_supported": SCOPES.split(),
+        "authorization_response_iss_parameter_supported": True,
+    }
+
+
 def create_auth_router(storage: Storage) -> APIRouter:
     router = APIRouter()
 
@@ -95,19 +117,7 @@ def create_auth_router(storage: Storage) -> APIRouter:
 
     @router.get("/.well-known/oauth-authorization-server")
     async def auth_metadata():
-        origin = public_url(storage)
-        return {
-            "issuer": origin,
-            "authorization_endpoint": origin + "/oauth/authorize",
-            "token_endpoint": origin + "/oauth/token",
-            "registration_endpoint": origin + "/oauth/register",
-            "response_types_supported": ["code"],
-            "grant_types_supported": ["authorization_code", "refresh_token"],
-            "token_endpoint_auth_methods_supported": ["none"],
-            "code_challenge_methods_supported": ["S256"],
-            "scopes_supported": SCOPES.split(),
-            "authorization_response_iss_parameter_supported": True,
-        }
+        return authorization_server_metadata(storage)
 
     @router.get("/.well-known/openid-configuration")
     async def openid_compatibility_metadata():
