@@ -51,7 +51,8 @@ jobs:
           VERSION: ${{ needs.release-please.outputs.version }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y ruby ruby-dev rpm zstd
+          sudo apt-get install -y ruby ruby-dev rpm zstd libarchive-tools
+          command -v bsdtar
           sudo gem install fpm --no-document
           fpm -s dir -t deb -n devmesh-studio -v "$VERSION" -a amd64 \
             --license GPL-3.0-or-later --description "Local developer control plane for ChatGPT over MCP" \
