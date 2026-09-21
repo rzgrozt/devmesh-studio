@@ -50,6 +50,10 @@ def test_oauth_pkce_and_mcp_tool_list(tmp_path, monkeypatch):
     names={t["name"] for t in tools}
     assert {"fs_read","fs_edit","terminal_exec","git_status","agent_delegate","mcp_call","approval_list"}.issubset(names)
     assert len(tools) == 55
+    widget_tools={t["name"] for t in tools if "_meta" in t}
+    assert widget_tools == {"fs_write","fs_edit","patch_preview","patch_apply","patch_revert","git_diff","git_show"}
+    assert all(t["_meta"]["ui"]["resourceUri"] == "ui://devmesh/change-review-v3.html" for t in tools if "_meta" in t)
+    assert all(t["outputSchema"]["type"] == "object" for t in tools)
 
     repo_dir=tmp_path/"repo"; repo_dir.mkdir(); (repo_dir/"hello.txt").write_text("hello world\n",encoding="utf-8")
     repo=storage.add_repository(repo_dir)
@@ -103,11 +107,16 @@ def test_modern_2026_discovery_and_tool_results(tmp_path, monkeypatch):
     assert result["resultType"] == "complete"
     assert result["supportedVersions"] == ["2026-07-28"]
     assert result["capabilities"]["tools"]["listChanged"] is False
+    assert result["capabilities"]["resources"]["listChanged"] is False
     assert result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "DevMesh Studio"
 
     listed=client.post("/mcp",headers=headers,json={"jsonrpc":"2.0","id":"d2","method":"tools/list","params":{"_meta":meta}}).json()["result"]
     assert listed["resultType"] == "complete"
     assert len(listed["tools"]) == 55
+    resources=client.post("/mcp",headers=headers,json={"jsonrpc":"2.0","id":"d2r","method":"resources/list","params":{"_meta":meta}}).json()["result"]
+    assert resources["resources"][0]["mimeType"] == "text/html;profile=mcp-app"
+    widget=client.post("/mcp",headers=headers,json={"jsonrpc":"2.0","id":"d2w","method":"resources/read","params":{"uri":"ui://devmesh/change-review-v3.html","_meta":meta}}).json()["result"]
+    assert "Changes ready" in widget["contents"][0]["text"]
 
     repo_dir=tmp_path/"modern-repo"; repo_dir.mkdir(); (repo_dir/"hello.txt").write_text("modern mcp\n",encoding="utf-8")
     repo=storage.add_repository(repo_dir)
@@ -115,6 +124,16 @@ def test_modern_2026_discovery_and_tool_results(tmp_path, monkeypatch):
     assert called["resultType"] == "complete"
     assert called["isError"] is False
     assert "modern mcp" in called["structuredContent"]["result"]["text"]
+    assert called["structuredContent"]["usage"]["estimated"] is True
+
+
+def test_refresh_token_is_reusable_and_sliding(tmp_path):
+    storage = Storage(tmp_path / "refresh.db")
+    storage.save_refresh("stable-refresh", "client-1", "tester", "offline_access", 4_000_000_000)
+    first = storage.rotate_refresh("stable-refresh")
+    second = storage.rotate_refresh("stable-refresh")
+    assert first and second
+    assert first["client_id"] == second["client_id"] == "client-1"
 
 
 def test_credential_rotation_revokes_oauth_sessions(tmp_path, monkeypatch):

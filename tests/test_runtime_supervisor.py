@@ -17,6 +17,19 @@ from devmesh_studio.core.storage import Storage
 from devmesh_studio.services.runtime_supervisor import RuntimeSupervisor
 
 
+def test_status_does_not_probe_tailscale_on_ui_poll(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEVMESH_DATA_DIR", str(tmp_path / "data"))
+    storage = Storage(tmp_path / "status.db")
+    storage.set_setting("tunnel_mode", "tailscale")
+    storage.set_setting("public_url", "https://devmesh.example.ts.net")
+    supervisor = RuntimeSupervisor(storage)
+    monkeypatch.setattr(supervisor, "tailscale_public_url", lambda: (_ for _ in ()).throw(AssertionError("slow probe")))
+    monkeypatch.setattr(supervisor, "tunnel_running", lambda: (_ for _ in ()).throw(AssertionError("slow probe")))
+    status = supervisor.status()
+    assert status["public_url"] == "https://devmesh.example.ts.net"
+    assert status["tunnel"] is True
+
+
 def _free_port():
     s=socket.socket(); s.bind(("127.0.0.1",0)); port=s.getsockname()[1]; s.close(); return port
 

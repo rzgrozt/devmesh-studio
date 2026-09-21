@@ -146,7 +146,7 @@ class DashboardPage(QWidget):
         root.addWidget(runtime_frame)
 
         health=QGridLayout(); health.setSpacing(10)
-        c,self.active_proc,self.active_proc_detail=status_card("Processes","0","DevMesh PTY sessions"); health.addWidget(c,0,0)
+        c,self.active_proc,self.active_proc_detail=status_card("Commands","0","Audited terminal runs"); health.addWidget(c,0,0)
         c,self.repo_health,self.repo_health_detail=status_card("Repository health","—","Git state across codebases"); health.addWidget(c,0,1)
         c,self.approval_health,self.approval_health_detail=status_card("Approval queue","clear","No pending remote mutations"); health.addWidget(c,0,2)
         c,self.public_health,self.public_health_detail=status_card("Gateway","offline","Local + tunnel state"); health.addWidget(c,0,3)
@@ -166,8 +166,8 @@ class DashboardPage(QWidget):
         self.refresh()
 
     def refresh(self):
-        repos=self.storage.list_repositories(True); calls=self.storage.list_calls(200); patches=self.storage.list_patches(200); approvals=self.storage.list_approvals("pending")
-        self.repo_metric.setText(str(len(repos))); self.call_metric.setText(str(len(calls))); self.patch_metric.setText(str(len(patches))); self.pending_metric.setText(str(len(approvals)))
+        repos=self.storage.list_repositories(True); calls=self.storage.list_calls(200); approvals=self.storage.list_approvals("pending"); counts=self.storage.dashboard_counts()
+        self.repo_metric.setText(str(len(repos))); self.call_metric.setText(str(counts["calls"])); self.patch_metric.setText(str(counts["patches"])); self.pending_metric.setText(str(len(approvals)))
         self.pending_hint.setText("waiting for review" if approvals else "nothing waiting")
         st=self.supervisor.status(); running=bool(st["gateway"])
         self.status.setText("● running" if running else "● stopped"); self.status.setObjectName("success" if running else "dangerText"); self.status.style().unpolish(self.status); self.status.style().polish(self.status)
@@ -175,13 +175,7 @@ class DashboardPage(QWidget):
         self.public_health.setText("online" if running else "offline"); self.public_health.setObjectName("success" if running else "dangerText"); self.public_health.style().unpolish(self.public_health); self.public_health.style().polish(self.public_health)
         self.public_health_detail.setText(st.get("public_url") or st.get("local_url") or "Runtime is stopped")
         pending=len(approvals); self.approval_health.setText("clear" if not pending else f"{pending} pending"); self.approval_health_detail.setText("No pending remote mutations" if not pending else "Open Approvals to review queued actions")
-        proc_count=0
-        try:
-            from devmesh_studio.tools.terminal import TerminalTools
-            proc_count=len(TerminalTools(ToolContext(self.storage)).list_sessions())
-        except Exception:
-            pass
-        self.active_proc.setText(str(proc_count)); self.active_proc_detail.setText("persistent PTY session" + ("s" if proc_count != 1 else ""))
+        self.active_proc.setText(str(counts["commands"])); self.active_proc_detail.setText("audited terminal command" + ("s" if counts["commands"] != 1 else ""))
         self.repo_health.setText(f"{len(repos)} registered")
         self.repo_health_detail.setText("Open Repositories or Git for an on-demand working-tree check")
 
@@ -450,8 +444,14 @@ class ApprovalsPage(QWidget):
         root.addLayout(page_header("Approvals","Review permission-gated actions requested remotely"))
         bar=QHBoxLayout();self.once=QPushButton("Approve once");self.once.setObjectName("primary");self.always=QPushButton("Always allow matching");self.deny=QPushButton("Deny");self.deny.setObjectName("danger")
         for b in (self.once,self.always,self.deny):bar.addWidget(b)
-        bar.addStretch();root.addLayout(bar);self.table=make_table(["ID","Actor","Repo","Action","Resource","Status"]);root.addWidget(self.table,1)
+        bar.addStretch();root.addLayout(bar)
+        split=QSplitter(Qt.Orientation.Vertical); split.setChildrenCollapsible(False)
+        self.table=make_table(["ID","Actor","Repo","Action","Resource","Status"]); split.addWidget(self.table)
+        detail_frame,detail_lay=panel("Request details")
+        self.detail=QPlainTextEdit(); self.detail.setReadOnly(True); self.detail.setPlaceholderText("Select an approval to inspect its exact arguments and matching rule")
+        detail_lay.addWidget(self.detail); split.addWidget(detail_frame); split.setSizes([480,220]); root.addWidget(split,1)
         self.once.clicked.connect(lambda:self.resolve("approved_once"));self.always.clicked.connect(lambda:self.resolve("approved_always"));self.deny.clicked.connect(lambda:self.resolve("denied"))
+        self.table.itemSelectionChanged.connect(self.show_details)
     def selected_id(self):
         rows=self.table.selectionModel().selectedRows();return int(self.table.item(rows[0].row(),0).text()) if rows else None
     def refresh(self):
@@ -459,6 +459,12 @@ class ApprovalsPage(QWidget):
         for i,row in enumerate(rows):
             vals=[row["id"],row["actor"],row.get("repo_id") or "—",row["action"],row["resource"],row["status"]]
             for j,v in enumerate(vals): set_cell(self.table,i,j,v)
+        self.show_details()
+    def show_details(self):
+        pid=self.selected_id(); row=self.storage.get_approval(pid) if pid else None
+        if not row: self.detail.clear(); return
+        display={"action":row["action"],"resource":row["resource"],"actor":row["actor"],"suggested_pattern":row.get("suggested_pattern"),"arguments":row.get("args")}
+        self.detail.setPlainText(json.dumps(display,ensure_ascii=False,indent=2,default=str))
     def resolve(self,status):
         pid=self.selected_id()
         if pid:
@@ -467,7 +473,7 @@ class ApprovalsPage(QWidget):
 
 
 class PermissionsPage(QWidget):
-    ACTIONS=["read","list","glob","grep","code_intel","skill","edit","task","bash_safe","bash","git_read","git_write","git_push","agent","mcp","external_directory"]
+    ACTIONS=["read","list","glob","grep","code_intel","skill","edit","task","bash_safe","bash","git_read","git_write","git_stage","git_commit","git_branch","git_checkout","git_restore","git_history_rewrite","git_push","git_force_push","agent","mcp","external_directory"]
     def __init__(self, storage:Storage):
         super().__init__(); self.storage=storage
         root=QVBoxLayout(self); root.setContentsMargins(24,22,24,22); root.setSpacing(14); root.addLayout(page_header("Permissions","Repository-scoped allow / ask / deny rules; higher-priority granular rules win"))

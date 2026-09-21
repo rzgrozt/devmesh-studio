@@ -10,6 +10,12 @@ UNIX_DIRNAME = "devmesh-studio"
 
 def _ensure(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        try:
+            path.chmod(0o700)
+        except OSError:
+            # Read-only/managed installations may own the directory elsewhere.
+            pass
     return path
 
 

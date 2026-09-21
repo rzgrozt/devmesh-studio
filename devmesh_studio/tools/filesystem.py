@@ -194,6 +194,30 @@ class FilesystemTools:
             )
         )
 
+    @staticmethod
+    def _reverse_patch_for_display(patch: str) -> str:
+        """Return a readable unified diff describing the reverse operation."""
+        source = patch.splitlines()
+        reversed_lines: list[str] = []
+        index = 0
+        while index < len(source):
+            line = source[index]
+            if line.startswith("--- ") and index + 1 < len(source) and source[index + 1].startswith("+++ "):
+                reversed_lines.extend(("--- " + source[index + 1][4:], "+++ " + line[4:]))
+                index += 2
+                continue
+            hunk = re.match(r"^@@ -(\d+(?:,\d+)?) \+(\d+(?:,\d+)?) @@(.*)$", line)
+            if hunk:
+                reversed_lines.append(f"@@ -{hunk.group(2)} +{hunk.group(1)} @@{hunk.group(3)}")
+            elif line.startswith("-"):
+                reversed_lines.append("+" + line[1:])
+            elif line.startswith("+"):
+                reversed_lines.append("-" + line[1:])
+            else:
+                reversed_lines.append(line)
+            index += 1
+        return "\n".join(reversed_lines)
+
     def write(self, actor: str, repo_id: int, path: str, content: str, overwrite: bool = True) -> dict[str, Any]:
         args = {"path": path, "content_sha256": self.ctx.storage.sha(content), "overwrite": overwrite}
         with self.ctx.record(actor, repo_id, "fs_write", path, args):
@@ -260,7 +284,7 @@ class FilesystemTools:
                 proc = subprocess.run(["git", "apply", "--check", temp], cwd=root, capture_output=True, text=True, timeout=30)
             finally:
                 Path(temp).unlink(missing_ok=True)
-            return {"valid": proc.returncode == 0, "paths": paths, "stderr": proc.stderr.strip()}
+            return {"valid": proc.returncode == 0, "paths": paths, "stderr": proc.stderr.strip(), "diff": patch}
 
     def apply_patch(self, actor: str, repo_id: int, patch: str) -> dict[str, Any]:
         args = {"patch_sha256": self.ctx.storage.sha(patch)}
@@ -281,7 +305,7 @@ class FilesystemTools:
             finally:
                 Path(temp).unlink(missing_ok=True)
             patch_id = self.ctx.storage.add_patch(repo_id, actor, "patch_apply", patch, paths)
-            return {"applied": True, "paths": paths, "patch_id": patch_id}
+            return {"applied": True, "paths": paths, "patch_id": patch_id, "diff": patch}
 
     def revert_patch(self, actor: str, patch_id: int) -> dict[str, Any]:
         patch_row = self.ctx.storage.get_patch(patch_id)
@@ -307,4 +331,5 @@ class FilesystemTools:
             finally:
                 Path(temp).unlink(missing_ok=True)
             self.ctx.storage.mark_patch_reverted(patch_id)
-            return {"reverted": True, "patch_id": patch_id, "paths": patch_row["changed_paths"]}
+            reversed_patch = self._reverse_patch_for_display(patch_row["patch"])
+            return {"reverted": True, "patch_id": patch_id, "paths": patch_row["changed_paths"], "diff": reversed_patch}

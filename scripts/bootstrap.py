@@ -95,6 +95,7 @@ def platform_paths() -> dict[str, Path]:
 
 def source_ignore(directory: str, names: list[str]) -> set[str]:
     ignored = {
+        ".git",
         ".venv",
         ".testvenv",
         ".pytest_cache",
@@ -116,6 +117,22 @@ def copy_source(source: Path, target: Path) -> None:
     print(f"[DevMesh] Installing source into {target}")
     target.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, target, dirs_exist_ok=True, ignore=source_ignore)
+
+
+def verify_mcp_ui_source(root: Path) -> None:
+    """Refuse an install that would silently keep an old gateway/UI package."""
+    required = (
+        root / "devmesh_studio" / "runtime" / "auth.py",
+        root / "devmesh_studio" / "runtime" / "mcp_http.py",
+        root / "devmesh_studio" / "runtime" / "tool_registry.py",
+        root / "devmesh_studio" / "runtime" / "tool_widget.py",
+    )
+    missing = [str(path.relative_to(root)) for path in required if not path.is_file()]
+    if missing:
+        raise SystemExit(
+            "Incomplete DevMesh source tree; refusing to retain stale runtime files. Missing: "
+            + ", ".join(missing)
+        )
 
 
 def venv_python(app_dir: Path) -> Path:
@@ -337,7 +354,9 @@ def install_windows(source: Path, paths: dict[str, Path], *, desktop: bool = Tru
 
 def install_source(source: Path, paths: dict[str, Path], *, desktop: bool = True) -> None:
     app_dir = paths["app"]
+    verify_mcp_ui_source(source)
     copy_source(source, app_dir)
+    verify_mcp_ui_source(app_dir)
     py = ensure_source_runtime(app_dir)
     write_metadata(app_dir, source=source, mode="source", paths=paths)
     if sys.platform.startswith("linux"):
@@ -374,25 +393,28 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         install_windows(source, paths, desktop=True)
         return
 
-    if (app_dir / ".git").exists() and shutil.which("git"):
-        _run(["git", "pull", "--ff-only"], cwd=app_dir)
-        ensure_source_runtime(app_dir)
-        write_linux_launcher(paths, app_dir, venv_python(app_dir))
-        write_linux_desktop(paths, app_dir)
-        print("[DevMesh] Upgrade complete")
-        return
-
     source_value = args.source or metadata.get("source")
     if source_value:
         source = Path(source_value).expanduser()
         if source.exists() and not _same_path(source, app_dir):
+            verify_mcp_ui_source(source)
             copy_source(source, app_dir)
+            verify_mcp_ui_source(app_dir)
             ensure_source_runtime(app_dir)
             write_linux_launcher(paths, app_dir, venv_python(app_dir))
             write_linux_desktop(paths, app_dir)
             write_metadata(app_dir, source=source, mode="source", paths=paths)
             print("[DevMesh] Upgrade complete from local source")
             return
+
+    if (app_dir / ".git").exists() and shutil.which("git"):
+        _run(["git", "pull", "--ff-only"], cwd=app_dir)
+        verify_mcp_ui_source(app_dir)
+        ensure_source_runtime(app_dir)
+        write_linux_launcher(paths, app_dir, venv_python(app_dir))
+        write_linux_desktop(paths, app_dir)
+        print("[DevMesh] Upgrade complete")
+        return
 
     raise SystemExit(
         "No upgrade source is available. Re-run install.sh or use: devmesh upgrade --source /path/to/devmesh-studio"
@@ -544,6 +566,10 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     print(f"Python: {sys.version.split()[0]} · {sys.executable}")
     print(f"App: {'installed' if paths['app'].exists() else 'missing'} · {paths['app']}")
     print(f"Data: {paths['data']}")
+    installed_widget = paths["app"] / "devmesh_studio" / "runtime" / "tool_widget.py"
+    print(f"ChatGPT widget: {'installed' if installed_widget.is_file() else 'missing'} · {installed_widget}")
+    if paths["app"].exists() and not installed_widget.is_file():
+        problems.append("installed runtime is stale and has no ChatGPT MCP Apps widget")
     if not shutil.which("git"):
         problems.append("git is not available on PATH")
     if sys.platform.startswith("linux") and not shutil.which("xdg-open"):

@@ -94,7 +94,7 @@ The Tailscale Funnel hostname is stable across DevMesh and machine restarts, so 
 
 ## ChatGPT coding tools
 
-DevMesh currently exposes **55 MCP tools**. The HTTP endpoint supports the current MCP **2026-07-28** stateless `server/discover` path and retains the legacy initialize handshake for older clients.
+DevMesh currently exposes **55 MCP tools**. The HTTP endpoint supports the current MCP **2026-07-28** stateless `server/discover` path and retains the legacy initialize handshake for older clients. Every tool is linked to a compact ChatGPT UI inspector with input/output views, specialized diff and terminal rendering, duration, copy controls, and clearly labeled estimated tool-payload token counts.
 
 ### Repository and filesystem
 `repo_list`, `repo_info`, `repo_stats`, `repo_recent_changes`, `fs_read`, `fs_read_many`, `fs_stat`, `fs_list`, `fs_tree`, `fs_glob`, `fs_grep`, `fs_write`, `fs_edit`, `patch_preview`, `patch_apply`, `patch_revert`
@@ -130,12 +130,14 @@ Language servers themselves are external developer tools and are not bundled int
 
 Every filesystem path is resolved against an explicitly registered repository root. `..` traversal and absolute paths outside the repository are rejected.
 
-Default remote permissions are conservative:
+Default remote permissions optimize for uninterrupted, repository-confined coding:
 
 - reading/search/list/Git inspection/code intelligence/skills: **allow**
 - `.env` and secret-like reads: **ask**
-- edits/patches/terminal/Git writes/tasks/agent delegation/downstream MCP calls: **ask**
-- `git push`: **deny**
+- edits/patches/detected tasks/known-safe terminal commands: **allow**
+- Git stage, commit, branch creation and checkout: **allow**
+- open-ended shell, worktree restore, history rewriting, `git push`, agent delegation and downstream MCP calls: **ask**
+- force push: **deny**
 - external-directory access: **deny**
 - obviously destructive command patterns such as `rm -rf /`, `mkfs`, raw-disk writes and `sudo *`: hard denied before the configurable permission layer
 
@@ -143,13 +145,15 @@ A remote `ask` returns an approval ID to ChatGPT. Approve it in **Approvals**, t
 
 Actions clicked directly in the local PyQt application count as explicit human actions and do not generate a second approval prompt.
 
-Downstream MCP discovery and invocation are deliberately separate: adding a server does not remotely expose every tool. Exact tool names must be in that server's `allowed_tools` list.
+Downstream MCP discovery and invocation are deliberately separate: adding a server does not remotely expose every tool. Tool names or explicit wildcard patterns such as `browser_*` must be in that server's `allowed_tools` list.
+
+OAuth refresh tokens are reusable and long-lived so concurrent ChatGPT refresh requests cannot revoke one another and force a reconnect. They are still revoked when the DevMesh credentials are explicitly changed. Access tokens remain short-lived and audience-bound to the MCP endpoint.
 
 ## Data and secrets
 
 On Linux, state is stored under `${XDG_DATA_HOME:-~/.local/share}/devmesh-studio/`, configuration metadata under `${XDG_CONFIG_HOME:-~/.config}/devmesh-studio/`, and disposable cache under `${XDG_CACHE_HOME:-~/.cache}/devmesh-studio/`. On Windows, DevMesh uses `%LOCALAPPDATA%\DevMesh Studio\Data`, `%APPDATA%\DevMesh Studio`, and `%LOCALAPPDATA%\DevMesh Studio\Cache`. Override these for development/tests with `DEVMESH_DATA_DIR`, `DEVMESH_CONFIG_DIR`, and `DEVMESH_CACHE_DIR`.
 
-- repository configuration, audit metadata, permissions and patches: SQLite
+- repository configuration, audit metadata, permissions and patches: SQLite with user-only filesystem permissions
 - passwords: never stored; only Argon2 hashes
 - JWT signing secret: OS keyring when available, otherwise a user-only `0600` fallback file
 - downstream MCP environment values stay local and are not returned through `mcp_list`

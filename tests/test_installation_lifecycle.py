@@ -57,6 +57,17 @@ class InstallationLifecycleTests(unittest.TestCase):
         self.assertIn('"install_mode": "source"', text)
         self.assertIn(str(paths["data"]), text)
 
+    def test_source_copy_excludes_git_metadata(self):
+        source = self.root / "source"
+        target = self.root / "target"
+        (source / ".git" / "objects").mkdir(parents=True)
+        (source / ".git" / "objects" / "private").write_text("git", encoding="utf-8")
+        (source / "devmesh_studio").mkdir()
+        (source / "devmesh_studio" / "module.py").write_text("ok = True", encoding="utf-8")
+        bootstrap.copy_source(source, target)
+        self.assertFalse((target / ".git").exists())
+        self.assertTrue((target / "devmesh_studio" / "module.py").exists())
+
     def test_path_overrides_are_shared_by_installer(self):
         env = {
             "DEVMESH_INSTALL_DIR": str(self.root / "custom-app"),

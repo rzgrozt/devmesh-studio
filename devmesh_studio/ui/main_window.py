@@ -53,6 +53,7 @@ class MainWindow(QMainWindow):
         footer_lay = QVBoxLayout(footer); footer_lay.setContentsMargins(10, 9, 10, 9); footer_lay.setSpacing(2)
         self.sidebar_status = QLabel("● Runtime stopped"); self.sidebar_status.setObjectName("dangerText")
         self.sidebar_hint = QLabel("Local developer gateway"); self.sidebar_hint.setObjectName("sidebarMuted")
+        self.sidebar_hint.setWordWrap(True)
         footer_lay.addWidget(self.sidebar_status); footer_lay.addWidget(self.sidebar_hint)
         side.addWidget(footer)
 

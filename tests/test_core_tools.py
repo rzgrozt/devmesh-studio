@@ -60,9 +60,12 @@ def test_apply_and_revert_git_patch(repo_env):
     subprocess.run(["git", "restore", "README.md"], cwd=root, check=True)
     preview = fs.patch_preview("desktop", repo["id"], patch)
     assert preview["valid"]
+    assert preview["diff"] == patch
     applied = fs.apply_patch("desktop", repo["id"], patch)
+    assert applied["diff"] == patch
     assert "extra line" in (root / "README.md").read_text()
-    fs.revert_patch("desktop", applied["patch_id"])
+    reverted = fs.revert_patch("desktop", applied["patch_id"])
+    assert "-extra line" in reverted["diff"]
     assert (root / "README.md").read_text() == original
 
 
@@ -86,6 +89,18 @@ def test_terminal_exec_and_hard_deny(repo_env):
     assert result2["stdout"].strip() == "b"
     with pytest.raises(PermissionError):
         term.exec("desktop", repo["id"], command="rm -rf /")
+
+
+def test_safe_terminal_git_classification():
+    from devmesh_studio.tools.terminal import _is_safe_developer_command
+
+    assert _is_safe_developer_command(["git", "add", "src/app.py"], "git add src/app.py")
+    assert _is_safe_developer_command(["git", "commit", "-m", "save"], "git commit -m save")
+    assert _is_safe_developer_command(["git", "switch", "feature"], "git switch feature")
+    assert _is_safe_developer_command(["git", "restore", "--staged", "app.py"], "git restore --staged app.py")
+    assert not _is_safe_developer_command(["git", "checkout", "--", "app.py"], "git checkout -- app.py")
+    assert not _is_safe_developer_command(["git", "branch", "-D", "feature"], "git branch -D feature")
+    assert not _is_safe_developer_command(["git", "push", "--force"], "git push --force")
 
 
 def test_persistent_pty_session(repo_env):

@@ -37,7 +37,7 @@ htmlcov/
 *.sqlite
 *.sqlite3
 *.sqlite3-*
-runtime/
+/runtime/
 
 # Local config / credentials / secrets
 .env

@@ -572,11 +572,18 @@ class RuntimeSupervisor:
     # Status
     # -------------------------------------------------------------------------
 
-    def status(self) -> dict:
+    def status(self, probe: bool = False) -> dict:
+        """Return fast UI status; provider probing is opt-in.
+
+        Tailscale CLI calls can take seconds. The desktop polls this method, so
+        routine status rendering must never run those subprocesses on Qt's UI
+        thread.
+        """
         if self.tunnel_mode == "tailscale":
             public = (
-                self.tailscale_public_url()
+                (self.tailscale_public_url() if probe else None)
                 or self.public_url
+                or self.storage.get_setting("public_url")
             )
 
             # Avoid showing an old trycloudflare URL
@@ -615,9 +622,7 @@ class RuntimeSupervisor:
             "gateway": (
                 self.gateway_running()
             ),
-            "tunnel": (
-                self.tunnel_running()
-            ),
+            "tunnel": self.tunnel_running() if probe else bool(public and public.startswith("https://")),
             "tunnel_mode": (
                 self.tunnel_mode
             ),

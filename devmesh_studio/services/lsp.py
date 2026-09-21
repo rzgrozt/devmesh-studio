@@ -230,7 +230,7 @@ class LSPClient:
             "initialize",
             {
                 "processId": os.getpid(),
-                "clientInfo": {"name": "DevMesh Studio", "version": "1.1.0"},
+                "clientInfo": {"name": "DevMesh Studio", "version": "1.2.1"},
                 "rootUri": self.root.as_uri(),
                 "rootPath": str(self.root),
                 "workspaceFolders": [{"uri": self.root.as_uri(), "name": self.root.name}],

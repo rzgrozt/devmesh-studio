@@ -33,7 +33,7 @@ _SAFE_SIMPLE_PROGRAMS = {
     "python", "python3", "node", "npm", "npx", "pnpm", "yarn", "bun", "deno",
     "cargo", "rustc", "go", "make", "cmake", "ctest", "ninja", "meson",
 }
-_SAFE_GIT_SUBCOMMANDS = {"status", "diff", "log", "show", "branch", "rev-parse", "ls-files", "grep"}
+_SAFE_GIT_READ_SUBCOMMANDS = {"status", "diff", "log", "show", "rev-parse", "ls-files", "grep"}
 _SAFE_PYTHON_MODULES = {"pytest", "unittest", "compileall", "ruff", "mypy", "pyright", "coverage"}
 _SAFE_NODE_RUN_TARGETS = {"test", "lint", "check", "typecheck", "build", "format", "fmt", "ci"}
 _SAFE_MAKE_TARGETS = {"test", "tests", "lint", "check", "typecheck", "build", "format", "fmt", "verify"}
@@ -59,7 +59,21 @@ def _is_safe_developer_command(argv: list[str] | None, rendered: str) -> bool:
         if arg == ".." or arg.startswith("../") or os.path.isabs(arg) or "=/" in arg or "=../" in arg:
             return False
     if program == "git":
-        return bool(args) and args[0] in _SAFE_GIT_SUBCOMMANDS
+        if not args:
+            return False
+        subcommand, rest = args[0], args[1:]
+        if subcommand in _SAFE_GIT_READ_SUBCOMMANDS:
+            return True
+        if subcommand in {"add", "commit"}:
+            return True
+        if subcommand == "branch":
+            return not any(a in {"-d", "-D", "-m", "-M", "--delete", "--move"} for a in rest)
+        if subcommand in {"checkout", "switch"}:
+            destructive = {"-f", "--force", "-B", "--discard-changes"}
+            return "--" not in rest and not any(a in destructive for a in rest)
+        if subcommand == "restore":
+            return "--staged" in rest and "--worktree" not in rest
+        return False
     if program in {"python", "python3"}:
         if not args:
             return False

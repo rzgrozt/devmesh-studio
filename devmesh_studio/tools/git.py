@@ -53,19 +53,20 @@ class GitTools:
 
     def checkout(self, actor: str, repo_id: int, branch: str, create: bool = False) -> dict[str, Any]:
         argv = ["checkout"] + (["-b"] if create else []) + [branch]
-        return self._run(actor, repo_id, "git_checkout", argv, "git_write", f"git checkout {branch}")
+        action = "git_branch" if create else "git_checkout"
+        return self._run(actor, repo_id, "git_checkout", argv, action, f"git checkout {branch}")
 
     def add(self, actor: str, repo_id: int, paths: list[str]) -> dict[str, Any]:
         if not paths:
             raise ValueError("paths required")
         for path in paths:
             self.ctx.repos.resolve(repo_id, path)
-        return self._run(actor, repo_id, "git_add", ["add", "--", *paths], "git_write", "git add")
+        return self._run(actor, repo_id, "git_add", ["add", "--", *paths], "git_stage", "git add")
 
     def commit(self, actor: str, repo_id: int, message: str) -> dict[str, Any]:
         if not message.strip():
             raise ValueError("commit message required")
-        return self._run(actor, repo_id, "git_commit", ["commit", "-m", message], "git_write", "git commit", timeout=120)
+        return self._run(actor, repo_id, "git_commit", ["commit", "-m", message], "git_commit", "git commit", timeout=120)
 
     def restore(self, actor: str, repo_id: int, paths: list[str], staged: bool = False) -> dict[str, Any]:
         if not paths:
@@ -73,7 +74,8 @@ class GitTools:
         for path in paths:
             self.ctx.repos.resolve(repo_id, path)
         argv = ["restore"] + (["--staged"] if staged else []) + ["--", *paths]
-        return self._run(actor, repo_id, "git_restore", argv, "git_write", "git restore")
+        action = "git_stage" if staged else "git_restore"
+        return self._run(actor, repo_id, "git_restore", argv, action, "git restore")
 
     def push(self, actor: str, repo_id: int, remote: str = "origin", branch: str | None = None) -> dict[str, Any]:
         argv = ["push", remote]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
-from devmesh_studio.runtime.tool_registry import TOOL_DEFS, ToolRegistry
+from jsonschema import validate
+from devmesh_studio.runtime.tool_registry import REVIEW_WIDGET_TOOLS, TOOL_DEFS, TOOL_OUTPUT_SCHEMA, ToolRegistry
 
 
 def test_tool_registry_is_unique_and_complete():
@@ -10,7 +11,23 @@ def test_tool_registry_is_unique_and_complete():
     for item in TOOL_DEFS:
         assert item["description"]
         assert item["inputSchema"]["type"]=="object"
+        assert item["outputSchema"]["type"]=="object"
+        assert set(item["outputSchema"]["required"]) == {"tool", "result", "status", "duration_ms", "usage"}
         assert "annotations" in item
+        assert ("_meta" in item) is (item["name"] in REVIEW_WIDGET_TOOLS)
+
+
+def test_common_output_schema_accepts_every_result_state():
+    usage = {"input_tokens": 4, "output_tokens": 8, "estimated": True}
+    for status, result in (
+        ("ok", {"path": "src/app.py", "bytes": 42}),
+        ("approval_required", {"approval_required": True, "approval_id": 7}),
+        ("error", {"error": "ValueError: invalid path"}),
+    ):
+        validate(
+            {"tool": "fs_write", "result": result, "status": status, "duration_ms": 12, "usage": usage},
+            TOOL_OUTPUT_SCHEMA,
+        )
 
 
 def test_history_repo_stats_and_approval_tools(repo_env):

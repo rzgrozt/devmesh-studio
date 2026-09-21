@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -146,6 +147,7 @@ class Storage:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self.init()
+        self._secure_database_files()
 
     @contextmanager
     def conn(self) -> Iterator[sqlite3.Connection]:
@@ -163,6 +165,18 @@ class Storage:
             db.executescript(SCHEMA)
             self._ensure_schema_columns(db)
         self._ensure_defaults()
+
+    def _secure_database_files(self) -> None:
+        """Keep OAuth material and downstream credentials private on shared hosts."""
+        if os.name == "nt":
+            return
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(self.path + suffix)
+            if candidate.exists():
+                try:
+                    candidate.chmod(0o600)
+                except OSError:
+                    pass
 
     @staticmethod
     def _ensure_schema_columns(db: sqlite3.Connection) -> None:
@@ -183,8 +197,9 @@ class Storage:
             "local_port": "8000",
             "public_url": "http://127.0.0.1:8000",
             "username": "devmesh",
-            "access_token_minutes": "15",
-            "refresh_token_days": "30",
+            "access_token_minutes": "60",
+            "refresh_token_days": "3650",
+            "oauth_profile_version": "0",
             "auto_tunnel": "1",
             "tunnel_mode": "tailscale",
             "named_tunnel_hostname": "",
@@ -197,6 +212,24 @@ class Storage:
                 db.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
         self._upgrade_tunnel_profile()
         self._upgrade_permission_profile()
+        self._upgrade_oauth_profile()
+
+    def _upgrade_oauth_profile(self) -> None:
+        """Move legacy short-lived rotating sessions to durable reusable sessions."""
+        try:
+            version = int(self.get_setting("oauth_profile_version", "0") or 0)
+        except ValueError:
+            version = 0
+        if version >= 1:
+            return
+        with self.conn() as db:
+            # Only rewrite the shipped legacy values; preserve explicit user choices.
+            db.execute("UPDATE settings SET value='60' WHERE key='access_token_minutes' AND value='15'")
+            db.execute("UPDATE settings SET value='3650' WHERE key='refresh_token_days' AND value='30'")
+            db.execute(
+                "INSERT INTO settings(key,value) VALUES('oauth_profile_version','1') "
+                "ON CONFLICT(key) DO UPDATE SET value='1'"
+            )
 
     def _upgrade_tunnel_profile(self) -> None:
         """Migrate legacy Cloudflare tunnel modes to Tailscale Funnel once.
@@ -229,30 +262,42 @@ class Storage:
             version = int(self.get_setting("permission_profile_version", "0") or 0)
         except ValueError:
             version = 0
-        if version >= 2:
+        if version >= 3:
             return
+        newly_safe = ["git_stage", "git_commit", "git_branch", "git_checkout"]
+        if version < 2:
+            newly_safe = ["read", "list", "glob", "grep", "git_read", "code_intel", "skill", "edit", "task", "bash_safe", *newly_safe]
         with self.conn() as db:
             repo_ids = [int(row["id"]) for row in db.execute("SELECT id FROM repositories").fetchall()]
             for repo_id in repo_ids:
-                for action in ("read", "list", "glob", "grep", "git_read", "code_intel", "skill", "edit", "task", "bash_safe"):
+                for action in newly_safe:
                     db.execute(
                         """INSERT INTO permissions(repo_id,action,pattern,effect,priority) VALUES(?,?,'*','allow',0)
                            ON CONFLICT(repo_id,action,pattern) DO UPDATE SET effect='allow',priority=0""",
                         (repo_id, action),
                     )
-                for action, effect in (("bash", "ask"), ("git_write", "ask"), ("agent", "ask"), ("mcp", "ask"), ("git_push", "deny"), ("external_directory", "deny")):
+                for action, effect in (("bash", "ask"), ("git_write", "allow"), ("git_restore", "ask"), ("git_history_rewrite", "ask"), ("git_push", "ask"), ("git_force_push", "deny"), ("agent", "ask"), ("mcp", "ask"), ("external_directory", "deny")):
                     db.execute(
                         """INSERT OR IGNORE INTO permissions(repo_id,action,pattern,effect,priority) VALUES(?,?,'*',?,0)""",
                         (repo_id, action, effect),
                     )
+                # Migrate only the exact shipped v2 wildcard defaults.
+                db.execute(
+                    "UPDATE permissions SET effect='allow' WHERE repo_id=? AND action='git_write' AND pattern='*' AND effect='ask' AND priority=0",
+                    (repo_id,),
+                )
+                db.execute(
+                    "UPDATE permissions SET effect='ask' WHERE repo_id=? AND action='git_push' AND pattern='*' AND effect='deny' AND priority=0",
+                    (repo_id,),
+                )
             # Old pending prompts for actions that are now explicitly safe are stale.
             db.execute(
-                """UPDATE approvals SET status='consumed', resolved_at=?
-                   WHERE status='pending' AND action IN ('read','list','glob','grep','git_read','code_intel','skill','edit','task','bash_safe')""",
-                (int(time.time()),),
+                f"""UPDATE approvals SET status='consumed', resolved_at=?
+                    WHERE status='pending' AND action IN ({','.join('?' for _ in newly_safe + ['git_write'])})""",
+                (int(time.time()), *newly_safe, "git_write"),
             )
             db.execute(
-                "INSERT INTO settings(key,value) VALUES('permission_profile_version','2') ON CONFLICT(key) DO UPDATE SET value='2'"
+                "INSERT INTO settings(key,value) VALUES('permission_profile_version','3') ON CONFLICT(key) DO UPDATE SET value='3'"
             )
 
     # settings -----------------------------------------------------------------
@@ -290,8 +335,8 @@ class Storage:
     def ensure_repo_permissions(self, repo_id: int) -> None:
         # Productive coding defaults: repository-confined reads, edits, detected tasks,
         # code intelligence and known-safe terminal commands do not interrupt the user.
-        # Open-ended shell, Git writes/pushes, agent delegation and external integrations
-        # remain gated (or denied) because their effects are harder to bound.
+        # Open-ended shell, destructive Git operations, pushes, agent delegation and
+        # external integrations remain gated because their effects are harder to bound.
         defaults = [
             ("read", "*", "allow", 0),
             ("read", "*.env", "ask", 100),
@@ -307,8 +352,15 @@ class Storage:
             ("task", "*", "allow", 0),
             ("bash_safe", "*", "allow", 0),
             ("bash", "*", "ask", 0),
-            ("git_write", "*", "ask", 0),
-            ("git_push", "*", "deny", 0),
+            ("git_write", "*", "allow", 0),
+            ("git_stage", "*", "allow", 0),
+            ("git_commit", "*", "allow", 0),
+            ("git_branch", "*", "allow", 0),
+            ("git_checkout", "*", "allow", 0),
+            ("git_restore", "*", "ask", 0),
+            ("git_history_rewrite", "*", "ask", 0),
+            ("git_push", "*", "ask", 0),
+            ("git_force_push", "*", "deny", 0),
             ("agent", "*", "ask", 0),
             ("mcp", "*", "ask", 0),
             ("external_directory", "*", "deny", 0),
@@ -389,6 +441,26 @@ class Storage:
             else:
                 rows = db.execute("SELECT * FROM approvals ORDER BY id DESC LIMIT 500").fetchall()
         return [dict(r) for r in rows]
+
+    def get_approval(self, approval_id: int) -> dict[str, Any] | None:
+        with self.conn() as db:
+            row = db.execute("SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        try:
+            data["args"] = json.loads(data.get("args_json") or "{}")
+        except json.JSONDecodeError:
+            data["args"] = data.get("args_json")
+        return data
+
+    def dashboard_counts(self) -> dict[str, int]:
+        with self.conn() as db:
+            return {
+                "calls": int(db.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0]),
+                "patches": int(db.execute("SELECT COUNT(*) FROM patches").fetchone()[0]),
+                "commands": int(db.execute("SELECT COUNT(*) FROM terminal_history").fetchone()[0]),
+            }
 
     def resolve_approval(self, approval_id: int, status: str) -> None:
         if status not in {"approved_once", "approved_always", "denied"}:
@@ -669,15 +741,21 @@ class Storage:
         with self.conn() as db:
             db.execute("INSERT INTO refresh_tokens VALUES (?,?,?,?,?,0)", (self.sha(token), client_id, subject, scope, expires_at))
 
-    def rotate_refresh(self, token: str) -> dict[str, Any] | None:
+    def validate_refresh(self, token: str) -> dict[str, Any] | None:
+        """Validate and extend a reusable refresh token without revoking it."""
         key = self.sha(token)
         now = int(time.time())
         with self.conn() as db:
             row = db.execute("SELECT * FROM refresh_tokens WHERE token_hash=?", (key,)).fetchone()
             if not row or row["revoked"] or row["expires_at"] < now:
                 return None
-            db.execute("UPDATE refresh_tokens SET revoked=1 WHERE token_hash=?", (key,))
+            days = int(self.get_setting("refresh_token_days", "3650") or 3650)
+            db.execute("UPDATE refresh_tokens SET expires_at=? WHERE token_hash=?", (now + days * 86400, key))
         return dict(row)
+
+    def rotate_refresh(self, token: str) -> dict[str, Any] | None:
+        """Compatibility alias for callers from the former rotation model."""
+        return self.validate_refresh(token)
 
     def revoke_oauth_sessions(self) -> None:
         """Invalidate outstanding authorization state and refresh tokens.
