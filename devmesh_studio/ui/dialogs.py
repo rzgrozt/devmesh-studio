@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shlex
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLineEdit,
     QMessageBox, QPlainTextEdit, QVBoxLayout
@@ -9,6 +8,7 @@ from argon2 import PasswordHasher
 
 from devmesh_studio.core.storage import Storage
 from devmesh_studio.core.secrets import SecretStore
+from devmesh_studio.core.platform import join_command, split_command
 
 
 class SetupDialog(QDialog):
@@ -111,7 +111,7 @@ class MCPServerDialog(QDialog):
             self.name.setText(str(self.initial.get("name", "")))
             self.transport.setCurrentText(str(self.initial.get("transport", "stdio")))
             self.command.setText(str(self.initial.get("command") or ""))
-            self.args.setText(" ".join(shlex.quote(str(x)) for x in self.initial.get("args", [])))
+            self.args.setText(join_command([str(x) for x in self.initial.get("args", [])]))
             self.url.setText(str(self.initial.get("url") or ""))
             self.allowed.setText(", ".join(self.initial.get("allowed_tools", [])))
             self.env.setPlainText("\n".join(f"{k}={v}" for k,v in self.initial.get("env", {}).items()))
@@ -127,7 +127,7 @@ class MCPServerDialog(QDialog):
             "name": self.name.text().strip(),
             "transport": self.transport.currentText(),
             "command": self.command.text().strip() or None,
-            "args": shlex.split(self.args.text()) if self.args.text().strip() else [],
+            "args": split_command(self.args.text()) if self.args.text().strip() else [],
             "url": self.url.text().strip() or None,
             "allowed_tools": [x.strip() for x in self.allowed.text().split(",") if x.strip()],
             "env": env,

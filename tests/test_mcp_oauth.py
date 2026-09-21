@@ -28,7 +28,7 @@ def test_oauth_pkce_and_mcp_tool_list(tmp_path, monkeypatch):
     client = TestClient(app)
 
     reg = client.post("/oauth/register", json={"client_name":"test","redirect_uris":["http://127.0.0.1/callback"]})
-    assert reg.status_code == 200
+    assert reg.status_code == 201
     client_id = reg.json()["client_id"]
     verifier = "v" * 64
     auth = client.get("/oauth/authorize", params={
@@ -134,6 +134,40 @@ def test_refresh_token_is_reusable_and_sliding(tmp_path):
     second = storage.rotate_refresh("stable-refresh")
     assert first and second
     assert first["client_id"] == second["client_id"] == "client-1"
+
+
+def test_oauth_discovery_advertises_path_aware_resource_and_dcr(tmp_path):
+    storage = Storage(tmp_path / "discovery.db")
+    storage.set_setting("public_url", "https://devmesh.example.test")
+    app = FastAPI(); app.include_router(create_auth_router(storage)); app.include_router(create_mcp_router(storage, ToolRegistry(storage)))
+    client = TestClient(app)
+
+    unauthorized = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+    assert unauthorized.status_code == 401
+    assert 'resource_metadata="https://devmesh.example.test/.well-known/oauth-protected-resource/mcp"' in unauthorized.headers["www-authenticate"]
+
+    resource = client.get("/.well-known/oauth-protected-resource/mcp").json()
+    metadata = client.get("/.well-known/oauth-authorization-server").json()
+    assert resource["resource"] == "https://devmesh.example.test/mcp"
+    assert metadata["registration_endpoint"] == "https://devmesh.example.test/oauth/register"
+
+    registered = client.post("/oauth/register", json={
+        "client_name": "Windows MCP host",
+        "redirect_uris": ["http://localhost:43110/callback"],
+        "token_endpoint_auth_method": "none",
+    })
+    assert registered.status_code == 201
+    assert registered.json()["client_id"].startswith("dvm_")
+    assert isinstance(registered.json()["client_id_issued_at"], int)
+
+
+def test_dcr_rejects_lookalike_loopback_hostname(tmp_path):
+    storage = Storage(tmp_path / "redirect.db")
+    app = FastAPI(); app.include_router(create_auth_router(storage))
+    response = TestClient(app).post("/oauth/register", json={
+        "redirect_uris": ["http://localhost.attacker.example/callback"],
+    })
+    assert response.status_code == 400
 
 
 def test_credential_rotation_revokes_oauth_sessions(tmp_path, monkeypatch):

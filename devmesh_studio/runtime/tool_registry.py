@@ -114,12 +114,12 @@ TOOL_DEFS = [
     tool("patch_apply", "Apply a validated unified Git patch confined to the repository.", obj({**REPO,"patch":{"type":"string"}}, ["repo_id","patch"]), RW),
     tool("patch_revert", "Reverse a previously recorded DevMesh patch when it still applies cleanly.", obj({"patch_id":{"type":"integer"}}, ["patch_id"]), RW),
 
-    tool("terminal_exec", "Run a command in the repository. Prefer argv for shell-free execution; command enables explicit bash pipelines/redirection.", obj({**REPO,"argv":{"type":"array","items":{"type":"string"}},"command":{"type":"string"},"timeout":{"type":"integer","default":120,"maximum":900},"env":{"type":"object","additionalProperties":{"type":"string"}}}, ["repo_id"]), DANGER),
-    tool("terminal_start", "Start a persistent PTY session in a repository.", obj({**REPO,"command":{"type":"string","default":"/bin/bash"}}, ["repo_id"]), DANGER),
-    tool("terminal_write", "Write input to a persistent PTY session.", obj({"session_id":{"type":"string"},"data":{"type":"string"}}, ["session_id","data"]), DANGER),
+    tool("terminal_exec", "Run a command in the repository. Prefer argv for shell-free execution; command enables native-shell pipelines/redirection.", obj({**REPO,"argv":{"type":"array","items":{"type":"string"}},"command":{"type":"string"},"timeout":{"type":"integer","default":120,"maximum":900},"env":{"type":"object","additionalProperties":{"type":"string"}}}, ["repo_id"]), DANGER),
+    tool("terminal_start", "Start a persistent native terminal session in a repository (PTY on Unix, redirected process on Windows).", obj({**REPO,"command":{"type":"string","default":""}}, ["repo_id"]), DANGER),
+    tool("terminal_write", "Write input to a persistent terminal session.", obj({"session_id":{"type":"string"},"data":{"type":"string"}}, ["session_id","data"]), DANGER),
     tool("terminal_read", "Read accumulated output from a persistent PTY session.", obj({"session_id":{"type":"string"},"clear":{"type":"boolean","default":True}}, ["session_id"]), RO),
     tool("terminal_kill", "Terminate a persistent PTY session.", obj({"session_id":{"type":"string"}}, ["session_id"]), DANGER),
-    tool("process_list", "List terminal/PTy processes created through DevMesh.", obj(), RO),
+    tool("process_list", "List terminal processes created through DevMesh.", obj(), RO),
 
     tool("git_status", "Return structured Git status text and repository metadata.", obj(REPO, ["repo_id"]), RO),
     tool("git_diff", "Return Git diff for working tree or index.", obj({**REPO,"staged":{"type":"boolean","default":False},"path":{"type":"string"}}, ["repo_id"]), RO),

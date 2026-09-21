@@ -1,10 +1,6 @@
 from __future__ import annotations
 
 import os
-import pty
-import select
-import shlex
-import signal
 import subprocess
 import threading
 import time
@@ -13,6 +9,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .base import ToolContext
+from devmesh_studio.core.platform import IS_WINDOWS, command_shell, join_command, process_group_kwargs, shell_argv, split_command
+
+if not IS_WINDOWS:  # These modules do not exist on Windows.
+    import pty
+    import select
 
 
 BLOCKED_PATTERNS = (
@@ -44,13 +45,15 @@ def _is_safe_developer_command(argv: list[str] | None, rendered: str) -> bool:
     if any(token in rendered for token in _SHELL_META):
         return False
     try:
-        parts = list(argv) if argv is not None else shlex.split(rendered)
+        parts = list(argv) if argv is not None else split_command(rendered)
     except ValueError:
         return False
     if not parts:
         return False
 
-    program = os.path.basename(parts[0])
+    program = os.path.basename(parts[0]).lower()
+    if IS_WINDOWS:
+        program = os.path.splitext(program)[0]
     if program not in _SAFE_SIMPLE_PROGRAMS:
         return False
 
@@ -123,30 +126,31 @@ def _is_safe_developer_command(argv: list[str] | None, rendered: str) -> bool:
 
 def _normalized_command(argv: list[str] | None, command: str | None) -> tuple[list[str] | None, str]:
     if argv:
-        return list(argv), shlex.join(argv)
+        return list(argv), join_command(argv)
     if command is None:
         raise ValueError("argv or command is required")
     return None, command.strip()
 
 
 @dataclass
-class PtySession:
+class TerminalSession:
     id: str
     repo_id: int
     pid: int
-    master_fd: int
+    master_fd: int | None
     command: str
     started_at: float
     buffer: bytearray = field(default_factory=bytearray)
     lock: threading.Lock = field(default_factory=threading.Lock)
     exited: bool = False
     returncode: int | None = None
+    process: subprocess.Popen[bytes] | None = None
 
 
 class TerminalTools:
     def __init__(self, ctx: ToolContext):
         self.ctx = ctx
-        self.sessions: dict[str, PtySession] = {}
+        self.sessions: dict[str, TerminalSession] = {}
         self._session_lock = threading.RLock()
 
     @staticmethod
@@ -179,7 +183,7 @@ class TerminalTools:
                 else:
                     # Explicit shell mode is supported because coding workflows need
                     # pipes/redirection, but permission is evaluated on the full text.
-                    proc = subprocess.run(command or "", cwd=root, capture_output=True, text=True, timeout=min(max(timeout, 1), 900), env=proc_env, shell=True, executable="/bin/bash")
+                    proc = subprocess.run(shell_argv(command or ""), cwd=root, capture_output=True, text=True, timeout=min(max(timeout, 1), 900), env=proc_env, shell=False)
             except subprocess.TimeoutExpired as exc:
                 duration = int((time.monotonic() - started) * 1000)
                 out = (exc.stdout or "") + (exc.stderr or "")
@@ -195,26 +199,53 @@ class TerminalTools:
                 "duration_ms": duration,
             }
 
-    def start(self, actor: str, repo_id: int, command: str = "/bin/bash") -> dict[str, Any]:
-        args = {"command": command}
-        with self.ctx.record(actor, repo_id, "terminal_start", command, args):
-            bad = self._dangerous(command)
+    def start(self, actor: str, repo_id: int, command: str = "") -> dict[str, Any]:
+        rendered = command.strip() or command_shell()
+        args = {"command": rendered}
+        with self.ctx.record(actor, repo_id, "terminal_start", rendered, args):
+            bad = self._dangerous(rendered)
             if bad:
                 raise PermissionError(f"hard-denied dangerous command pattern: {bad}")
-            self.ctx.permissions.require(actor, repo_id, "bash", command, args, suggested_pattern="*")
+            self.ctx.permissions.require(actor, repo_id, "bash", rendered, args, suggested_pattern="*")
             root = self.ctx.repos.root(repo_id)
-            pid, fd = pty.fork()
-            if pid == 0:  # pragma: no cover - child process
-                os.chdir(root)
-                os.execv("/bin/bash", ["/bin/bash", "-lc", command])
             sid = uuid.uuid4().hex[:12]
-            session = PtySession(sid, repo_id, pid, fd, command, time.monotonic())
+            if IS_WINDOWS:
+                process = subprocess.Popen(
+                    shell_argv(command or None),
+                    cwd=root,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    bufsize=0,
+                    **process_group_kwargs(),
+                )
+                session = TerminalSession(sid, repo_id, process.pid, None, rendered, time.monotonic(), process=process)
+            else:
+                master_fd, slave_fd = pty.openpty()
+                try:
+                    process = subprocess.Popen(
+                        shell_argv(command or None),
+                        cwd=root,
+                        stdin=slave_fd,
+                        stdout=slave_fd,
+                        stderr=slave_fd,
+                        close_fds=True,
+                        **process_group_kwargs(),
+                    )
+                finally:
+                    os.close(slave_fd)
+                session = TerminalSession(sid, repo_id, process.pid, master_fd, rendered, time.monotonic(), process=process)
             with self._session_lock:
                 self.sessions[sid] = session
             threading.Thread(target=self._reader, args=(session,), daemon=True).start()
-            return {"session_id": sid, "pid": pid, "command": command}
+            return {"session_id": sid, "pid": session.pid, "command": rendered, "terminal_mode": "pipes" if IS_WINDOWS else "pty"}
 
-    def _reader(self, session: PtySession) -> None:
+    def _reader(self, session: TerminalSession) -> None:
+        if IS_WINDOWS:
+            self._reader_windows(session)
+            return
+        assert session.master_fd is not None
+        assert session.process is not None
         try:
             while True:
                 ready, _, _ = select.select([session.master_fd], [], [], 0.2)
@@ -229,16 +260,38 @@ class TerminalTools:
                         session.buffer.extend(chunk)
                         if len(session.buffer) > 1_000_000:
                             del session.buffer[:-1_000_000]
-                pid, status = os.waitpid(session.pid, os.WNOHANG)
-                if pid == session.pid:
+                returncode = session.process.poll()
+                if returncode is not None:
                     session.exited = True
-                    session.returncode = os.waitstatus_to_exitcode(status)
+                    session.returncode = returncode
                     break
         finally:
             try:
                 os.close(session.master_fd)
             except OSError:
                 pass
+            if session.returncode is None:
+                try:
+                    session.returncode = session.process.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    session.returncode = session.process.poll()
+            session.exited = session.returncode is not None
+
+    def _reader_windows(self, session: TerminalSession) -> None:
+        process = session.process
+        assert process is not None and process.stdout is not None
+        try:
+            while True:
+                chunk = process.stdout.read(65536)
+                if not chunk:
+                    break
+                with session.lock:
+                    session.buffer.extend(chunk)
+                    if len(session.buffer) > 1_000_000:
+                        del session.buffer[:-1_000_000]
+        finally:
+            session.returncode = process.wait()
+            session.exited = True
 
     def write(self, actor: str, session_id: str, data: str) -> dict[str, Any]:
         with self._session_lock:
@@ -250,7 +303,13 @@ class TerminalTools:
             self.ctx.permissions.require(actor, s.repo_id, "bash", f"terminal:{session_id}", args, suggested_pattern="*")
             if s.exited:
                 raise RuntimeError("terminal session has exited")
-            os.write(s.master_fd, data.encode())
+            if s.master_fd is None:
+                if not s.process or s.process.stdin is None:
+                    raise RuntimeError("terminal input is unavailable")
+                s.process.stdin.write(data.encode())
+                s.process.stdin.flush()
+            else:
+                os.write(s.master_fd, data.encode())
             return {"written": len(data.encode())}
 
     def read(self, actor: str, session_id: str, clear: bool = True) -> dict[str, Any]:
@@ -276,8 +335,10 @@ class TerminalTools:
             self.ctx.permissions.require(actor, s.repo_id, "bash", f"terminal:{session_id}", args, suggested_pattern="*")
             if not s.exited:
                 try:
-                    os.kill(s.pid, signal.SIGTERM)
-                except ProcessLookupError:
+                    if s.process is None:
+                        raise ProcessLookupError(s.pid)
+                    s.process.terminate()
+                except (ProcessLookupError, OSError):
                     pass
             return {"killed": True, "session_id": session_id}
 

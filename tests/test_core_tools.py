@@ -134,12 +134,15 @@ def test_tasks_code_intel_and_skills(repo_env):
 
 
 def test_agent_delegate_with_fake_codex(repo_env, tmp_path, monkeypatch):
+    import sys
+    from devmesh_studio.tools import agents as agents_module
+
     storage, repo, root = repo_env
-    bindir = tmp_path / "bin"; bindir.mkdir()
-    fake = bindir / "codex"
-    fake.write_text("#!/bin/sh\nprintf 'FAKE_CODEX %s\\n' \"$*\"\n")
-    fake.chmod(0o755)
-    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+    fake = tmp_path / "fake_codex.py"
+    fake.write_text("import sys\nprint('FAKE_CODEX', *sys.argv[1:])\n", encoding="utf-8")
+    monkeypatch.setitem(agents_module.DELEGATES["codex"], "propose", [sys.executable, str(fake), "{task}"])
+    original_which = agents_module.shutil.which
+    monkeypatch.setattr(agents_module.shutil, "which", lambda name: sys.executable if name == "codex" else original_which(name))
     agents = AgentTools(ToolContext(storage))
     listed = {a["id"]: a for a in agents.list("desktop")["agents"]}
     assert listed["codex"]["available"]
@@ -180,8 +183,10 @@ def test_remaining_git_operations(repo_env):
 def test_terminal_write_read_kill_and_process_list(repo_env):
     storage, repo, root = repo_env
     term = TerminalTools(ToolContext(storage))
-    s = term.start("desktop", repo["id"], "cat")
-    term.write("desktop", s["session_id"], "TERMINAL_ECHO\n")
+    command = "" if os.name == "nt" else "cat"
+    payload = "echo TERMINAL_ECHO\r\n" if os.name == "nt" else "TERMINAL_ECHO\n"
+    s = term.start("desktop", repo["id"], command)
+    term.write("desktop", s["session_id"], payload)
     out = {"text": ""}
     for _ in range(30):
         time.sleep(0.05)

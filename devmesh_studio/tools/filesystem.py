@@ -6,6 +6,7 @@ import glob as globlib
 import os
 import re
 import subprocess
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -146,9 +147,9 @@ class FilesystemTools:
         with self.ctx.record(actor, repo_id, "fs_grep", query, args):
             self.ctx.permissions.require(actor, repo_id, "grep", query, args, suggested_pattern="*")
             root = self.ctx.repos.root(repo_id)
-            rg = subprocess.run(["which", "rg"], capture_output=True, text=True)
-            if rg.returncode == 0:
-                cmd = ["rg", "--line-number", "--column", "--no-heading", "--color", "never"]
+            rg = shutil.which("rg")
+            if rg:
+                cmd = [rg, "--line-number", "--column", "--no-heading", "--color", "never"]
                 if not regex:
                     cmd.append("--fixed-strings")
                 if glob:

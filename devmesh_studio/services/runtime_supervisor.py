@@ -17,6 +17,7 @@ from typing import Callable
 import psutil
 
 from devmesh_studio.core.paths import bin_dir, runtime_dir
+from devmesh_studio.core.platform import IS_WINDOWS, executable, process_group_kwargs
 from devmesh_studio.core.storage import Storage
 
 
@@ -157,10 +158,16 @@ class RuntimeSupervisor:
     # -------------------------------------------------------------------------
 
     def ensure_tailscale(self) -> Path:
-        found = shutil.which("tailscale")
+        program_files = Path(os.environ.get("ProgramFiles") or r"C:\Program Files")
+        local_app_data = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        found = executable(
+            "tailscale",
+            program_files / "Tailscale" / "tailscale.exe",
+            local_app_data / "Tailscale" / "tailscale.exe",
+        )
 
         if found:
-            return Path(found)
+            return found
 
         raise RuntimeError(
             "Tailscale is not installed.\n\n"
@@ -316,8 +323,8 @@ class RuntimeSupervisor:
         if not self.tailscale_logged_in():
             raise RuntimeError(
                 "Tailscale is installed but is not connected.\n\n"
-                "Run:\n"
-                "    sudo tailscale up\n\n"
+                "Open Tailscale and sign in, or run:\n"
+                f"    {'tailscale up' if IS_WINDOWS else 'sudo tailscale up'}\n\n"
                 "Then sign in and try again."
             )
 
@@ -416,6 +423,13 @@ class RuntimeSupervisor:
                 or "Unknown Tailscale error."
             ).strip()
 
+            operator_help = ""
+            if not IS_WINDOWS:
+                operator_help = (
+                    "• your Linux user may control Tailscale\n\n"
+                    "If necessary run:\n\n"
+                    "sudo tailscale set --operator=$USER\n\n"
+                )
             raise RuntimeError(
                 "Could not start Tailscale Funnel.\n\n"
                 "Check that:\n"
@@ -423,9 +437,7 @@ class RuntimeSupervisor:
                 "• MagicDNS is enabled\n"
                 "• HTTPS is enabled for the tailnet\n"
                 "• Funnel is permitted for this device\n"
-                "• your Linux user may control Tailscale\n\n"
-                "If necessary run:\n\n"
-                "sudo tailscale set --operator=$USER\n\n"
+                f"{operator_help}"
                 "Then try again.\n\n"
                 f"Tailscale output:\n{detail}"
             )
@@ -461,7 +473,7 @@ class RuntimeSupervisor:
         if found:
             return Path(found)
 
-        local = bin_dir() / "cloudflared"
+        local = bin_dir() / ("cloudflared.exe" if IS_WINDOWS else "cloudflared")
 
         if (
             local.exists()
@@ -475,24 +487,20 @@ class RuntimeSupervisor:
         system = platform.system()
         machine = platform.machine().lower()
 
-        if system == "Linux":
+        if system in {"Linux", "Windows"}:
             if machine in {
                 "x86_64",
                 "amd64",
             }:
-                asset = (
-                    "cloudflared-linux-amd64"
-                )
+                asset = "cloudflared-windows-amd64.exe" if system == "Windows" else "cloudflared-linux-amd64"
 
             elif machine in {
                 "aarch64",
                 "arm64",
             }:
-                asset = (
-                    "cloudflared-linux-arm64"
-                )
+                asset = "cloudflared-windows-arm64.exe" if system == "Windows" else "cloudflared-linux-arm64"
 
-            elif machine.startswith("arm"):
+            elif machine.startswith("arm") and system == "Linux":
                 asset = (
                     "cloudflared-linux-arm"
                 )
@@ -522,7 +530,8 @@ class RuntimeSupervisor:
                 tmp,
             )
 
-            tmp.chmod(0o755)
+            if not IS_WINDOWS:
+                tmp.chmod(0o755)
             tmp.replace(local)
 
             return local
@@ -737,7 +746,7 @@ class RuntimeSupervisor:
                 gateway_argv,
                 stdout=log,
                 stderr=subprocess.STDOUT,
-                start_new_session=True,
+                **process_group_kwargs(hidden=IS_WINDOWS),
             )
             self._remember_gateway_pid()
 
@@ -883,8 +892,8 @@ class RuntimeSupervisor:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                start_new_session=True,
                 env=os.environ.copy(),
+                **process_group_kwargs(hidden=IS_WINDOWS),
             )
 
             self._tunnel_thread = (

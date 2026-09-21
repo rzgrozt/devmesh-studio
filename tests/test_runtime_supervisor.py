@@ -41,8 +41,11 @@ def test_supervisor_fake_quick_tunnel_end_to_end(tmp_path, monkeypatch):
     storage.set_setting("password_hash",PasswordHasher().hash("very-long-test-password"))
     storage.set_setting("local_port",str(_free_port()))
     storage.set_setting("tunnel_mode","quick")
-    fake=tmp_path/"cloudflared"
-    fake.write_text("#!/bin/sh\necho 'INF https://fake-devmesh-123.trycloudflare.com'\nsleep 30\n")
+    fake=tmp_path/("cloudflared.cmd" if os.name == "nt" else "cloudflared")
+    if os.name == "nt":
+        fake.write_text("@echo INF https://fake-devmesh-123.trycloudflare.com\r\n@ping -n 31 127.0.0.1 >NUL\r\n", encoding="utf-8")
+    else:
+        fake.write_text("#!/bin/sh\necho 'INF https://fake-devmesh-123.trycloudflare.com'\nsleep 30\n", encoding="utf-8")
     fake.chmod(0o755)
     sup=RuntimeSupervisor(storage)
     monkeypatch.setattr(sup,"ensure_cloudflared",lambda:fake)

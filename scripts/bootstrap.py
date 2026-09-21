@@ -229,6 +229,45 @@ def write_linux_desktop(paths: dict[str, Path], app_dir: Path) -> None:
     print(f"[DevMesh] Desktop entry installed: {desktop}")
 
 
+def write_macos_app(paths: dict[str, Path]) -> None:
+    bundle = paths["desktop"]
+    if bundle.is_file():
+        bundle.unlink()
+    macos = bundle / "Contents" / "MacOS"
+    macos.mkdir(parents=True, exist_ok=True)
+    executable = macos / "devmesh"
+    executable.write_text(
+        f'#!/bin/sh\nexec {json.dumps(str(paths["launcher"]))} "$@"\n',
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    (bundle / "Contents" / "Info.plist").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>DevMesh Studio</string>
+<key>CFBundleDisplayName</key><string>DevMesh Studio</string>
+<key>CFBundleIdentifier</key><string>studio.devmesh.desktop</string>
+<key>CFBundleExecutable</key><string>devmesh</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>NSHighResolutionCapable</key><true/>
+</dict></plist>
+""",
+        encoding="utf-8",
+    )
+    print(f"[DevMesh] macOS application installed: {bundle}")
+
+
+def write_platform_launchers(paths: dict[str, Path], app_dir: Path, py: Path, *, desktop: bool) -> None:
+    write_linux_launcher(paths, app_dir, py)
+    if not desktop:
+        return
+    if sys.platform == "darwin":
+        write_macos_app(paths)
+    else:
+        write_linux_desktop(paths, app_dir)
+
+
 def powershell() -> str | None:
     return shutil.which("powershell") or shutil.which("pwsh")
 
@@ -253,9 +292,18 @@ def create_windows_shortcut(target: Path, shortcut: Path) -> None:
     _run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command])
 
 
-def pyinstaller_command(entry: Path, *, name: str, console: bool, dist: Path, work: Path, spec: Path) -> list[str]:
+def pyinstaller_command(
+    entry: Path,
+    *,
+    name: str,
+    console: bool,
+    dist: Path,
+    work: Path,
+    spec: Path,
+    python: Path | None = None,
+) -> list[str]:
     argv = [
-        sys.executable,
+        str(python or sys.executable),
         "-m",
         "PyInstaller",
         "--noconfirm",
@@ -269,11 +317,19 @@ def pyinstaller_command(entry: Path, *, name: str, console: bool, dist: Path, wo
         str(work),
         "--specpath",
         str(spec),
-        "--collect-all",
+        "--collect-submodules",
+        "keyring.backends",
+        "--copy-metadata",
         "keyring",
-        "--collect-all",
+        "--collect-submodules",
+        "mcp.client",
+        "--collect-submodules",
+        "mcp.shared",
+        "--hidden-import",
         "mcp",
     ]
+    if os.name == "nt":
+        argv.extend(["--hidden-import", "keyring.backends.Windows"])
     argv.append("--console" if console else "--windowed")
     argv.append(str(entry))
     return argv
@@ -291,6 +347,12 @@ def build_windows(source: Path, *, dry_run: bool = False) -> tuple[Path, Path]:
     work_root.mkdir(parents=True, exist_ok=True)
     spec.mkdir(parents=True, exist_ok=True)
 
+    build_venv = source / "build" / "windows-venv"
+    build_python = build_venv / "Scripts" / "python.exe"
+    if not dry_run and not build_python.exists():
+        print("[DevMesh] Creating isolated Windows build environment")
+        venv.EnvBuilder(with_pip=True).create(build_venv)
+
     gui_entry = source / "devmesh_gui.py"
     server_entry = source / "devmesh_server.py"
     gui_cmd = pyinstaller_command(
@@ -300,6 +362,7 @@ def build_windows(source: Path, *, dry_run: bool = False) -> tuple[Path, Path]:
         dist=dist,
         work=work_root / "gui",
         spec=spec,
+        python=build_python if not dry_run else None,
     )
     server_cmd = pyinstaller_command(
         server_entry,
@@ -308,6 +371,7 @@ def build_windows(source: Path, *, dry_run: bool = False) -> tuple[Path, Path]:
         dist=dist,
         work=work_root / "server",
         spec=spec,
+        python=build_python if not dry_run else None,
     )
 
     if dry_run:
@@ -316,7 +380,11 @@ def build_windows(source: Path, *, dry_run: bool = False) -> tuple[Path, Path]:
         print("SERVER:", " ".join(server_cmd))
         return dist / f"{APP_NAME}.exe", dist / "devmesh-server.exe"
 
-    _run([sys.executable, "-m", "pip", "install", "-e", ".[build]"], cwd=source)
+    _run([str(build_python), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], cwd=source)
+    _run(
+        [str(build_python), "-m", "pip", "install", "--only-binary=:all:", ".[build]"],
+        cwd=source,
+    )
     _run(gui_cmd, cwd=source)
     _run(server_cmd, cwd=source)
 
@@ -359,12 +427,7 @@ def install_source(source: Path, paths: dict[str, Path], *, desktop: bool = True
     verify_mcp_ui_source(app_dir)
     py = ensure_source_runtime(app_dir)
     write_metadata(app_dir, source=source, mode="source", paths=paths)
-    if sys.platform.startswith("linux"):
-        write_linux_launcher(paths, app_dir, py)
-        if desktop:
-            write_linux_desktop(paths, app_dir)
-    else:
-        print(f"[DevMesh] Source runtime prepared at {app_dir}")
+    write_platform_launchers(paths, app_dir, py, desktop=desktop)
 
 
 def cmd_install(args: argparse.Namespace) -> None:
@@ -401,8 +464,7 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
             copy_source(source, app_dir)
             verify_mcp_ui_source(app_dir)
             ensure_source_runtime(app_dir)
-            write_linux_launcher(paths, app_dir, venv_python(app_dir))
-            write_linux_desktop(paths, app_dir)
+            write_platform_launchers(paths, app_dir, venv_python(app_dir), desktop=True)
             write_metadata(app_dir, source=source, mode="source", paths=paths)
             print("[DevMesh] Upgrade complete from local source")
             return
@@ -411,8 +473,7 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         _run(["git", "pull", "--ff-only"], cwd=app_dir)
         verify_mcp_ui_source(app_dir)
         ensure_source_runtime(app_dir)
-        write_linux_launcher(paths, app_dir, venv_python(app_dir))
-        write_linux_desktop(paths, app_dir)
+        write_platform_launchers(paths, app_dir, venv_python(app_dir), desktop=True)
         print("[DevMesh] Upgrade complete")
         return
 
@@ -566,10 +627,19 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     print(f"Python: {sys.version.split()[0]} · {sys.executable}")
     print(f"App: {'installed' if paths['app'].exists() else 'missing'} · {paths['app']}")
     print(f"Data: {paths['data']}")
-    installed_widget = paths["app"] / "devmesh_studio" / "runtime" / "tool_widget.py"
-    print(f"ChatGPT widget: {'installed' if installed_widget.is_file() else 'missing'} · {installed_widget}")
-    if paths["app"].exists() and not installed_widget.is_file():
-        problems.append("installed runtime is stale and has no ChatGPT MCP Apps widget")
+    metadata = read_metadata(paths["app"])
+    if metadata.get("mode") == "windows-exe":
+        gui = paths["app"] / f"{APP_NAME}.exe"
+        gateway = paths["app"] / "devmesh-server.exe"
+        print(f"Windows GUI: {'installed' if gui.is_file() else 'missing'} · {gui}")
+        print(f"Gateway: {'installed' if gateway.is_file() else 'missing'} · {gateway}")
+        if not gui.is_file() or not gateway.is_file():
+            problems.append("native Windows installation is incomplete")
+    else:
+        installed_widget = paths["app"] / "devmesh_studio" / "runtime" / "tool_widget.py"
+        print(f"ChatGPT widget: {'installed' if installed_widget.is_file() else 'missing'} · {installed_widget}")
+        if paths["app"].exists() and not installed_widget.is_file():
+            problems.append("installed runtime is stale and has no ChatGPT MCP Apps widget")
     if not shutil.which("git"):
         problems.append("git is not available on PATH")
     if sys.platform.startswith("linux") and not shutil.which("xdg-open"):

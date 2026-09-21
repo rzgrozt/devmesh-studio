@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import queue
-import shlex
 import shutil
 import subprocess
 import threading
@@ -14,6 +13,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from devmesh_studio.core.repository import RepositoryManager
+from devmesh_studio.core.platform import split_command
 from devmesh_studio.core.storage import Storage
 
 
@@ -322,7 +322,7 @@ class LSPManager:
     @staticmethod
     def _normalize_command(value: Any) -> list[str]:
         if isinstance(value, str):
-            return shlex.split(value)
+            return split_command(value)
         if isinstance(value, list) and all(isinstance(x, str) for x in value):
             return list(value)
         return []
@@ -339,8 +339,10 @@ class LSPManager:
             source = "custom" if command else "auto"
             if not command:
                 for candidate in default["candidates"]:
-                    if shutil.which(candidate[0]):
+                    found = shutil.which(candidate[0])
+                    if found:
                         command = list(candidate)
+                        command[0] = found
                         break
             if command:
                 specs.append(ServerSpec(language_id, extensions, tuple(command), source))

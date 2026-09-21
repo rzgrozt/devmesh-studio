@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse, Response
 from devmesh_studio import __version__
 from devmesh_studio.core.permissions import ApprovalRequired
 from devmesh_studio.core.storage import Storage
-from .auth import public_url, verify_access
+from .auth import protected_resource_metadata_url, verify_access
 from .tool_registry import ToolRegistry
 from .tool_widget import TOOL_WIDGET_HTML, TOOL_WIDGET_MIME, TOOL_WIDGET_URI, widget_resource
 
@@ -61,7 +61,7 @@ def create_mcp_router(storage: Storage, registry: ToolRegistry) -> APIRouter:
         return JSONResponse(
             {"error": "unauthorized"},
             status_code=401,
-            headers={"WWW-Authenticate": f'Bearer resource_metadata="{public_url(storage)}/.well-known/oauth-protected-resource"'},
+            headers={"WWW-Authenticate": f'Bearer resource_metadata="{protected_resource_metadata_url(storage)}"'},
         )
 
     @router.get("/mcp")

@@ -5,7 +5,7 @@ import hashlib
 import html
 import secrets
 import time
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import jwt
 from argon2 import PasswordHasher
@@ -21,6 +21,22 @@ ph = PasswordHasher()
 
 def public_url(storage: Storage) -> str:
     return (storage.get_setting("public_url", "http://127.0.0.1:8000") or "").rstrip("/")
+
+
+def protected_resource_metadata_url(storage: Storage) -> str:
+    return public_url(storage) + "/.well-known/oauth-protected-resource/mcp"
+
+
+def _valid_redirect_uri(value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+        if parsed.fragment or not parsed.scheme:
+            return False
+        if parsed.scheme == "https":
+            return bool(parsed.netloc)
+        return parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+    except ValueError:
+        return False
 
 
 def b64url_sha256(value: str) -> str:
@@ -57,15 +73,25 @@ def verify_access(storage: Storage, token: str) -> dict:
 def create_auth_router(storage: Storage) -> APIRouter:
     router = APIRouter()
 
-    @router.get("/.well-known/oauth-protected-resource")
-    async def protected_resource():
+    def resource_metadata():
         origin = public_url(storage)
         return {
             "resource": origin + "/mcp",
+            "resource_name": "DevMesh Studio MCP",
             "authorization_servers": [origin],
             "scopes_supported": SCOPES.split(),
             "bearer_methods_supported": ["header"],
         }
+
+    @router.get("/.well-known/oauth-protected-resource")
+    async def protected_resource():
+        # Compatibility location used by older MCP hosts.
+        return resource_metadata()
+
+    @router.get("/.well-known/oauth-protected-resource/mcp")
+    async def protected_resource_for_mcp():
+        # RFC 9728 path-aware discovery location for the /mcp resource.
+        return resource_metadata()
 
     @router.get("/.well-known/oauth-authorization-server")
     async def auth_metadata():
@@ -88,14 +114,21 @@ def create_auth_router(storage: Storage) -> APIRouter:
         # Some MCP hosts probe the OIDC discovery path before OAuth AS metadata.
         return await auth_metadata()
 
-    @router.post("/oauth/register")
+    @router.post("/oauth/register", status_code=201)
     async def register(request: Request):
-        body = await request.json()
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(400, "invalid_client_metadata") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(400, "invalid_client_metadata")
         redirect_uris = body.get("redirect_uris") or []
         if not redirect_uris or not all(isinstance(u, str) for u in redirect_uris):
             raise HTTPException(400, "redirect_uris required")
-        if any(not (u.startswith("https://") or u.startswith("http://127.0.0.1") or u.startswith("http://localhost")) for u in redirect_uris):
+        if any(not _valid_redirect_uri(u) for u in redirect_uris):
             raise HTTPException(400, "redirect URIs must be HTTPS or loopback localhost")
+        if body.get("token_endpoint_auth_method", "none") != "none":
+            raise HTTPException(400, "only public PKCE clients are supported")
         client_id = "dvm_" + secrets.token_urlsafe(24)
         storage.register_client(client_id, body.get("client_name", "MCP client"), redirect_uris)
         return {
@@ -105,6 +138,7 @@ def create_auth_router(storage: Storage) -> APIRouter:
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
             "token_endpoint_auth_method": "none",
+            "client_id_issued_at": int(time.time()),
         }
 
     @router.get("/oauth/authorize", response_class=HTMLResponse)

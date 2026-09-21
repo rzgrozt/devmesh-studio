@@ -18,7 +18,7 @@ function Write-DevMesh([string]$Message) {
 
 function Get-Python {
     $candidates = @(
-        @{ Command = 'py'; Prefix = @('-3.11') },
+        @{ Command = 'py'; Prefix = @('-3') },
         @{ Command = 'python'; Prefix = @() },
         @{ Command = 'python3'; Prefix = @() }
     )
