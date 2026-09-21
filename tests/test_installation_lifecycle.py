@@ -4,6 +4,7 @@ import argparse
 import os
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +12,7 @@ from unittest.mock import patch
 from scripts import bootstrap
 from devmesh_studio.core.storage import Storage
 from devmesh_studio.services.runtime_supervisor import RuntimeSupervisor
+from devmesh_studio import __version__
 
 
 class InstallationLifecycleTests(unittest.TestCase):
@@ -32,6 +34,11 @@ class InstallationLifecycleTests(unittest.TestCase):
             "data": self.root / "data",
             "cache": self.root / "cache",
         }
+
+    def test_package_and_runtime_versions_stay_synchronized(self):
+        with (Path(__file__).parents[1] / "pyproject.toml").open("rb") as handle:
+            project_version = tomllib.load(handle)["project"]["version"]
+        self.assertEqual(project_version, __version__)
 
     def test_linux_launcher_routes_lifecycle_commands(self):
         paths = self.paths()

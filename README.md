@@ -8,7 +8,7 @@ DevMesh exposes a broad coding runtime over authenticated MCP while a PyQt6 desk
 
 ## Fast start
 
-Requirements: Python 3.11+, Git, and internet access. Tailscale is recommended for the default stable public MCP URL; Cloudflare Quick Tunnel remains available as a temporary fallback.
+Requirements: 64-bit Python 3.11+, Git, and internet access. Use a native Python build for the host OS (do not reuse a WSL Python installation on Windows). Tailscale is recommended for the default stable public MCP URL; Cloudflare Quick Tunnel remains available as a temporary fallback.
 
 ### Linux
 
@@ -47,6 +47,8 @@ irm https://raw.githubusercontent.com/rzgrozt/devmesh-studio/main/install.ps1 | 
 
 It builds and installs both `DevMesh Studio.exe` and the sibling `devmesh-server.exe` gateway under `%LOCALAPPDATA%\Programs\DevMesh Studio`, then creates Start Menu and Desktop shortcuts. The separate gateway executable is required because a frozen GUI executable cannot launch the MCP runtime with Python's `-m` mechanism.
 
+The build uses a private build virtual environment under `build\windows-venv`; it does not modify the system Python environment and accepts binary wheels only. Frozen startup configures the bundled Qt DLL and plugin directories before importing PyQt6. Terminal tools use `cmd.exe` on Windows and Bash/PTYS only on Unix.
+
 From a source checkout you can build without installing:
 
 ```powershell
@@ -62,9 +64,15 @@ Or install/update/remove explicitly:
 .\install.ps1 -Action purge
 ```
 
+If Windows Defender or another endpoint-security product quarantines either executable, restore/allow both sibling executables; the GUI intentionally launches `devmesh-server.exe`. Run `devmesh.cmd doctor` from the install directory to detect an incomplete native install.
+
+### macOS
+
+From a source checkout, run `bash install.sh`. DevMesh installs an isolated runtime, `~/.local/bin/devmesh`, and `~/Applications/DevMesh Studio.app`. Configuration and state follow the native `~/Library/Application Support` and `~/Library/Caches` locations.
+
 ### Development launcher
 
-`python3 devmesh.py` remains available for source-development runs. It creates a repository-local `.venv` when needed; normal end-user installs should use the platform installer above.
+`python3 devmesh.py` (Linux/macOS) and `py -3 devmesh.py` (Windows) remain available for source-development runs. They create a repository-local `.venv` when needed; normal end-user installs should use the platform installer above.
 
 ## First launch
 
@@ -73,6 +81,8 @@ Or install/update/remove explicitly:
 3. Install/sign in to Tailscale once, enable Funnel for the device/tailnet, then open **Connections** and click **Start**. DevMesh starts the local FastAPI MCP runtime and publishes it through **Tailscale Funnel** in background mode by default.
 4. Copy the **ChatGPT MCP URL** shown in the application. It uses this machine's stable `*.ts.net` hostname, for example `https://devmesh.my-tailnet.ts.net/mcp`.
 5. In ChatGPT's custom MCP/app setup, register that URL, choose OAuth/authenticated access, scan tools, and authorize with the credentials you created in DevMesh Studio.
+
+DevMesh publishes both the RFC 9728 path-aware protected-resource document at `/.well-known/oauth-protected-resource/mcp` and the compatibility root document. OAuth authorization-server metadata advertises `/oauth/register` for Dynamic Client Registration (DCR). These routes are served by the gateway executable identically on Windows, macOS, and Linux.
 
 The Tailscale Funnel hostname is stable across DevMesh and machine restarts, so ChatGPT normally needs to be configured only once. **Cloudflare Quick Tunnel** remains available in Connections as an explicit temporary fallback when Tailscale is unavailable; its `trycloudflare.com` hostname is ephemeral.
 
@@ -151,7 +161,7 @@ OAuth refresh tokens are reusable and long-lived so concurrent ChatGPT refresh r
 
 ## Data and secrets
 
-On Linux, state is stored under `${XDG_DATA_HOME:-~/.local/share}/devmesh-studio/`, configuration metadata under `${XDG_CONFIG_HOME:-~/.config}/devmesh-studio/`, and disposable cache under `${XDG_CACHE_HOME:-~/.cache}/devmesh-studio/`. On Windows, DevMesh uses `%LOCALAPPDATA%\DevMesh Studio\Data`, `%APPDATA%\DevMesh Studio`, and `%LOCALAPPDATA%\DevMesh Studio\Cache`. Override these for development/tests with `DEVMESH_DATA_DIR`, `DEVMESH_CONFIG_DIR`, and `DEVMESH_CACHE_DIR`.
+On Linux, state is stored under `${XDG_DATA_HOME:-~/.local/share}/devmesh-studio/`, configuration metadata under `${XDG_CONFIG_HOME:-~/.config}/devmesh-studio/`, and disposable cache under `${XDG_CACHE_HOME:-~/.cache}/devmesh-studio/`. On Windows, DevMesh uses `%LOCALAPPDATA%\DevMesh Studio\Data`, `%APPDATA%\DevMesh Studio`, and `%LOCALAPPDATA%\DevMesh Studio\Cache`. On macOS it uses `~/Library/Application Support/DevMesh Studio` and `~/Library/Caches/DevMesh Studio`. Override these for development/tests with `DEVMESH_DATA_DIR`, `DEVMESH_CONFIG_DIR`, and `DEVMESH_CACHE_DIR`.
 
 - repository configuration, audit metadata, permissions and patches: SQLite with user-only filesystem permissions
 - passwords: never stored; only Argon2 hashes
@@ -186,6 +196,21 @@ python -m pytest -q
 ```
 
 See `TEST_REPORT.md` for the test matrix used for this release.
+
+## Automated releases
+
+DevMesh uses Release Please and Conventional Commits. Changes merged into `main` update an automatically maintained release PR and `CHANGELOG.md`. Merging that release PR creates the next semantic-version tag and GitHub Release, then native runners attach:
+
+- Linux x86-64: portable `tar.gz`, AppImage, Debian/Ubuntu `.deb`, Fedora/RHEL/openSUSE `.rpm`, and Arch/Manjaro `.pkg.tar.zst`
+- Windows x86-64: portable ZIP and an Inno Setup installer `.exe`
+- macOS: native `.app` archive and `.dmg`, named with the runner architecture
+- `SHA256SUMS.txt` covering every downloadable artifact
+
+Use Conventional Commit prefixes such as `fix:`, `feat:` and `feat!:`/`BREAKING CHANGE:` to select patch, minor and major versions. The release workflow synchronizes the version in `pyproject.toml`, `devmesh_studio/__init__.py`, the changelog, Git tag and release notes. See [the release workflow](.github/workflows/release.yml) and [packaging script](scripts/package_release.py).
+
+One repository setting is required: under **Settings → Actions → General → Workflow permissions**, allow GitHub Actions to create and approve pull requests. The workflow itself requests only `contents: write` and `pull-requests: write`; no long-lived release token is required.
+
+The default macOS output is ad-hoc signed, which is suitable for reproducible community builds but is not Apple-notarized. Official distribution without Gatekeeper warnings requires Apple Developer ID and notarization credentials to be added as repository secrets. Windows Authenticode signing likewise requires a publisher certificate; unsigned installers remain fully buildable.
 
 ## License
 

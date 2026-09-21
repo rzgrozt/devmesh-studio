@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=DevMesh Studio
+Comment=ChatGPT local developer control plane
+Exec=devmesh
+Icon=devmesh-studio
+Terminal=false
+Categories=Development;Utility;
+StartupNotify=true
