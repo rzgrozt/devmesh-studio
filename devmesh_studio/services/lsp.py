@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
 from devmesh_studio.core.repository import RepositoryManager
 from devmesh_studio.core.platform import split_command
@@ -431,7 +432,10 @@ def path_from_uri(uri: str) -> Path | None:
     parsed = urlparse(uri)
     if parsed.scheme != "file":
         return None
-    return Path(unquote(parsed.path)).resolve()
+    raw_path = unquote(parsed.path)
+    if parsed.netloc and parsed.netloc != "localhost":
+        raw_path = f"//{parsed.netloc}{raw_path}"
+    return Path(url2pathname(raw_path)).resolve()
 
 
 def position_to_dict(pos: dict[str, Any] | None) -> dict[str, int] | None:

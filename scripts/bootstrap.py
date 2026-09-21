@@ -33,6 +33,14 @@ def _same_path(a: Path, b: Path) -> bool:
         return False
 
 
+def _path_is_within(path: Path, directory: Path) -> bool:
+    try:
+        path.resolve().relative_to(directory.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def platform_paths() -> dict[str, Path]:
     home = Path.home()
     install_override = os.getenv("DEVMESH_INSTALL_DIR")
@@ -559,18 +567,21 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
     if os.name == "nt":
         _remove_path(paths["desktop"])
         _remove_path(paths["start_menu"])
-        # A running Windows bootstrap cannot delete its own parent reliably.
-        # Spawn a detached PowerShell cleanup after this process exits.
-        ps = powershell()
-        if app_dir.exists() and ps:
-            target = str(app_dir).replace("'", "''")
-            command = f"Start-Sleep -Milliseconds 700; Remove-Item -LiteralPath '{target}' -Recurse -Force -ErrorAction SilentlyContinue"
-            subprocess.Popen(
-                [ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        elif app_dir.exists():
-            print(f"[DevMesh] Remove this directory manually after exit: {app_dir}")
+        if app_dir.exists() and _path_is_within(Path(sys.executable), app_dir):
+            # A running Windows executable cannot delete its own parent.
+            # Spawn a detached cleanup only when DevMesh is executing there.
+            ps = powershell()
+            if ps:
+                target = str(app_dir).replace("'", "''")
+                command = f"Start-Sleep -Milliseconds 700; Remove-Item -LiteralPath '{target}' -Recurse -Force -ErrorAction SilentlyContinue"
+                subprocess.Popen(
+                    [ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            else:
+                print(f"[DevMesh] Remove this directory manually after exit: {app_dir}")
+        else:
+            _remove_path(app_dir)
     else:
         _remove_path(paths["launcher"])
         _remove_path(paths["desktop"])

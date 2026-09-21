@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import tempfile
@@ -60,9 +61,9 @@ class InstallationLifecycleTests(unittest.TestCase):
 
         manifest = paths["config"] / "install.json"
         self.assertTrue(manifest.exists())
-        text = manifest.read_text(encoding="utf-8")
-        self.assertIn('"install_mode": "source"', text)
-        self.assertIn(str(paths["data"]), text)
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        self.assertEqual(payload["install_mode"], "source")
+        self.assertEqual(Path(payload["data_dir"]), paths["data"])
 
     def test_source_copy_excludes_git_metadata(self):
         source = self.root / "source"
@@ -159,11 +160,11 @@ class InstallationLifecycleTests(unittest.TestCase):
             storage = Storage(data / "devmesh.db")
             supervisor = RuntimeSupervisor(storage)
             gui = self.root / "DevMesh Studio"
-            gateway = self.root / "devmesh-server"
+            gateway = self.root / ("devmesh-server.exe" if os.name == "nt" else "devmesh-server")
             gui.touch(); gateway.touch()
             with patch.object(sys, "executable", str(gui)), patch.object(sys, "frozen", True, create=True):
                 argv = supervisor.gateway_argv()
-            self.assertEqual(Path(argv[0]), gateway)
+            self.assertEqual(Path(argv[0]).resolve(), gateway.resolve())
             self.assertEqual(argv[-2:], ["--port", "8000"])
         finally:
             if old_data is None:
