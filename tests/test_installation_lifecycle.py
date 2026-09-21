@@ -99,12 +99,18 @@ class InstallationLifecycleTests(unittest.TestCase):
         paths["launcher"].write_text("launcher", encoding="utf-8")
         paths["desktop"].parent.mkdir(parents=True, exist_ok=True)
         paths["desktop"].write_text("desktop", encoding="utf-8")
+        if os.name == "nt":
+            paths["start_menu"].parent.mkdir(parents=True, exist_ok=True)
+            paths["start_menu"].write_text("start menu", encoding="utf-8")
 
         with patch.object(bootstrap, "platform_paths", return_value=paths):
             bootstrap.cmd_uninstall(argparse.Namespace(purge=False))
 
         self.assertFalse(paths["app"].exists())
-        self.assertFalse(paths["launcher"].exists())
+        if os.name == "nt":
+            self.assertFalse(paths["start_menu"].exists())
+        else:
+            self.assertFalse(paths["launcher"].exists())
         self.assertFalse(paths["desktop"].exists())
         self.assertTrue(paths["config"].exists())
         self.assertTrue(paths["data"].exists())
