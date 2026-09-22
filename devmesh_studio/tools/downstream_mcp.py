@@ -6,9 +6,19 @@ import hashlib
 import inspect
 import json
 import os
+import time
 from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncIterator
 
+from devmesh_studio.core.permissions import ApprovalRequired
+from devmesh_studio.runtime.live_activity import (
+    ActivityScope,
+    LiveActivity,
+    extract_target,
+    public_session,
+    sanitize_arguments,
+    target_metadata,
+)
 from .base import ToolContext
 
 
@@ -216,8 +226,9 @@ class _PersistentMCPWorker:
 
 
 class DownstreamMCPTools:
-    def __init__(self, ctx: ToolContext):
+    def __init__(self, ctx: ToolContext, live_activity: LiveActivity | None = None):
         self.ctx = ctx
+        self.live_activity = live_activity
         self._workers: dict[str, _PersistentMCPWorker] = {}
         self._workers_lock: asyncio.Lock | None = None
 
@@ -284,11 +295,14 @@ class DownstreamMCPTools:
     async def call(
         self,
         actor: str,
-        repo_id: int | None,
-        server_id: int | str,
-        tool_name: str,
-        arguments: dict[str, Any],
+        repo_id: int | None = None,
+        server_id: int | str | None = None,
+        tool_name: str | None = None,
+        arguments: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if server_id is None or not tool_name:
+            raise ValueError("server_id and tool_name are required")
+        arguments = arguments or {}
         server = self.ctx.storage.get_mcp_server(server_id)
         if not server or not server["enabled"]:
             raise KeyError(f"unknown/disabled MCP server: {server_id}")
@@ -297,15 +311,76 @@ class DownstreamMCPTools:
 
         args = {"server_id": server_id, "tool_name": tool_name, "arguments": arguments}
         resource = f"{server['name']}.{tool_name}"
-        with self.ctx.record(actor, repo_id, "mcp_call", resource, args):
-            self.ctx.permissions.require(
-                actor,
-                repo_id,
-                "mcp",
-                resource,
-                args,
-                suggested_pattern=f"{server['name']}.*",
-            )
-            worker = await self._worker_for(server)
-            result = await worker.request("call_tool", tool_name, arguments)
-            return _dump(result)
+        server_numeric_id = int(server["id"])
+        session = public_session(arguments)
+        scope = ActivityScope(actor, repo_id, server_numeric_id, session)
+        started = time.perf_counter()
+        with self.ctx.record(actor, repo_id, "mcp_call", resource, args) as call_id:
+            telemetry = bool(self.live_activity and await self.live_activity.interested(
+                actor=actor, repo_id=repo_id, server_id=server_numeric_id, session=session,
+            ))
+            details = sanitize_arguments(arguments) if telemetry else {}
+            target = target_metadata(arguments) if telemetry else None
+            base_event = {
+                "actor": actor, "source": "downstream_mcp", "server_id": server_numeric_id,
+                "server_name": server["name"], "tool": tool_name, "repo_id": repo_id,
+                "session": session, "call_id": call_id, "details": details,
+            }
+            if target:
+                base_event["target"] = target
+            if telemetry and self.live_activity:
+                await self.live_activity.publish({**base_event, "phase": "started", "status": "running"})
+            try:
+                self.ctx.permissions.require(
+                    actor,
+                    repo_id,
+                    "mcp",
+                    resource,
+                    args,
+                    suggested_pattern=f"{server['name']}.*",
+                )
+                worker = await self._worker_for(server)
+                result = await worker.request("call_tool", tool_name, arguments)
+                dumped = _dump(result)
+            except ApprovalRequired:
+                if telemetry and self.live_activity:
+                    await self.live_activity.publish({
+                        **base_event, "phase": "approval_required", "status": "approval_required",
+                        "duration_ms": round((time.perf_counter() - started) * 1000),
+                        "summary": f"Approval required for {tool_name}",
+                    })
+                raise
+            except Exception as exc:
+                if telemetry and self.live_activity:
+                    await self.live_activity.publish({
+                        **base_event, "phase": "failed", "status": "error",
+                        "duration_ms": round((time.perf_counter() - started) * 1000),
+                        "summary": f"{tool_name} failed ({type(exc).__name__})",
+                    })
+                raise
+            else:
+                completion_interested = bool(self.live_activity and (telemetry or await self.live_activity.interested(
+                    actor=actor, repo_id=repo_id, server_id=server_numeric_id, session=session,
+                )))
+                if self.live_activity and completion_interested:
+                    if not telemetry:
+                        details = sanitize_arguments(arguments)
+                        target = target_metadata(arguments)
+                        base_event["details"] = details
+                        if target:
+                            base_event["target"] = target
+                    preview = await self.live_activity.store_preview(dumped, scope)
+                    result_target = extract_target(dumped)
+                    result_failed = bool(isinstance(dumped, dict) and (dumped.get("isError") or dumped.get("is_error")))
+                    completed = {
+                        **base_event, "phase": "failed" if result_failed else "completed",
+                        "status": "error" if result_failed else "ok",
+                        "duration_ms": round((time.perf_counter() - started) * 1000),
+                        "summary": f"{tool_name} failed" if result_failed else f"{tool_name} completed",
+                    }
+                    if result_target:
+                        completed["target"] = {**(target or {}), **result_target}
+                    if preview:
+                        completed["preview"] = preview
+                    await self.live_activity.publish(completed)
+                return dumped
