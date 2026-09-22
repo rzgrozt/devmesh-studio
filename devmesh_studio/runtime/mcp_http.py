@@ -13,7 +13,9 @@ from devmesh_studio import __version__
 from devmesh_studio.core.permissions import ApprovalRequired
 from devmesh_studio.core.storage import Storage
 from .auth import protected_resource_metadata_url, verify_access
-from .tool_registry import ToolRegistry
+from .auth import public_url
+from .live_widget import LIVE_WIDGET_HTML, LIVE_WIDGET_MIME, LIVE_WIDGET_URI, live_widget_resource
+from .tool_registry import ToolDispatchResult, ToolRegistry
 from .tool_widget import TOOL_WIDGET_HTML, TOOL_WIDGET_MIME, TOOL_WIDGET_URI, widget_resource
 
 MODERN_PROTOCOL = "2026-07-28"
@@ -132,20 +134,29 @@ def create_mcp_router(storage: Storage, registry: ToolRegistry) -> APIRouter:
             return ok(result)
 
         if method == "resources/list":
-            result = {"resources": [widget_resource()]}
+            result = {"resources": [widget_resource(), live_widget_resource(public_url(storage))]}
             if modern:
                 result.update({"resultType": "complete", "_meta": _server_meta(), "ttlMs": 300_000, "cacheScope": "private"})
             return ok(result)
 
         if method == "resources/read":
-            if params.get("uri") != TOOL_WIDGET_URI:
+            uri = params.get("uri")
+            if uri not in {TOOL_WIDGET_URI, LIVE_WIDGET_URI}:
                 return err(-32002, "resource not found")
+            if uri == LIVE_WIDGET_URI:
+                resource = live_widget_resource(public_url(storage))
+                text = LIVE_WIDGET_HTML
+                mime = LIVE_WIDGET_MIME
+            else:
+                resource = widget_resource()
+                text = TOOL_WIDGET_HTML
+                mime = TOOL_WIDGET_MIME
             result = {
                 "contents": [{
-                    "uri": TOOL_WIDGET_URI,
-                    "mimeType": TOOL_WIDGET_MIME,
-                    "text": TOOL_WIDGET_HTML,
-                    "_meta": {"ui": {"prefersBorder": False}},
+                    "uri": uri,
+                    "mimeType": mime,
+                    "text": text,
+                    "_meta": resource.get("_meta", {}),
                 }]
             }
             if modern:
@@ -157,7 +168,13 @@ def create_mcp_router(storage: Storage, registry: ToolRegistry) -> APIRouter:
             arguments = params.get("arguments") or {}
             started = time.perf_counter()
             try:
-                data = await registry.dispatch(claims.get("sub", "chatgpt"), name, arguments)
+                dispatched = await registry.dispatch(claims.get("sub", "chatgpt"), name, arguments)
+                private_meta: dict[str, Any] = {}
+                if isinstance(dispatched, ToolDispatchResult):
+                    data = dispatched.data
+                    private_meta = dispatched.private_meta
+                else:
+                    data = dispatched
                 duration_ms = round((time.perf_counter() - started) * 1000)
                 usage = {"input_tokens": _estimated_tokens(arguments), "output_tokens": _estimated_tokens(data), "estimated": True}
                 result: dict[str, Any] = {
@@ -165,9 +182,11 @@ def create_mcp_router(storage: Storage, registry: ToolRegistry) -> APIRouter:
                     "structuredContent": {"tool": name, "result": data, "status": "ok", "duration_ms": duration_ms, "usage": usage},
                     "isError": False,
                 }
+                if private_meta:
+                    result["_meta"] = private_meta
                 if modern:
                     result["resultType"] = "complete"
-                    result["_meta"] = _server_meta()
+                    result.setdefault("_meta", {}).update(_server_meta())
                 return ok(result)
             except ApprovalRequired as exc:
                 duration_ms = round((time.perf_counter() - started) * 1000)
