@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import threading
 from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
@@ -31,6 +32,7 @@ class MainWindow(QMainWindow):
         self.supervisor = RuntimeSupervisor(self.storage, self.events.put)
         self._quitting = False
         self._shutdown_done = False
+        self._runtime_lifecycle_lock = threading.Lock()
 
         if not self.storage.get_setting("password_hash"):
             dlg = SetupDialog(self.storage, self)
@@ -125,6 +127,19 @@ class MainWindow(QMainWindow):
         self.refresh_all()
         self.refresh_runtime_badge()
 
+    def start_local_runtime_on_launch(self):
+        """Bring up the app-owned gateway without starting a public tunnel."""
+        def launch():
+            with self._runtime_lifecycle_lock:
+                if self._shutdown_done:
+                    return
+                try:
+                    self.supervisor.start(use_tunnel=False)
+                except Exception as exc:
+                    self.events.put(f"Local runtime did not start: {exc}")
+
+        threading.Thread(target=launch, name="devmesh-local-runtime-start", daemon=True).start()
+
     def refresh_runtime_badge(self):
         status = self.supervisor.status()
         running = bool(status.get("gateway"))
@@ -200,13 +215,14 @@ class MainWindow(QMainWindow):
         )
 
     def shutdown_runtime(self):
-        if self._shutdown_done:
-            return
-        self._shutdown_done = True
-        try:
-            self.supervisor.stop()
-        except Exception as exc:
-            self.events.put(f"Runtime shutdown warning: {exc}")
+        with self._runtime_lifecycle_lock:
+            if self._shutdown_done:
+                return
+            self._shutdown_done = True
+            try:
+                self.supervisor.stop()
+            except Exception as exc:
+                self.events.put(f"Runtime shutdown warning: {exc}")
 
     def quit_app(self):
         self._quitting = True
