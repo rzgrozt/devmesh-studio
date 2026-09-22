@@ -25,7 +25,7 @@ TOOL_WIDGET_HTML = r'''<!doctype html>
 <section class="body" id="body"></section></main>
 <script>
 const $=id=>document.getElementById(id);const state={input:{},output:{},expanded:false};
-function unwrap(value){return value?.structuredContent||value||{}}
+function unwrap(value){return value?._meta?.devmeshFullResult||value?.structuredContent||value||{}}
 function cleanPath(raw){return (raw||'').split('\t')[0].replace(/^[ab]\//,'')}
 function extractDiff(result,input){if(typeof result?.diff==='string')return result.diff;if(typeof result?.patch==='string')return result.patch;if(typeof result?.stdout==='string'){const at=result.stdout.indexOf('diff --git ');if(at>=0)return result.stdout.slice(at);if(result.stdout.startsWith('--- '))return result.stdout}return typeof input?.patch==='string'?input.patch:''}
 function splitFiles(patch){if(!patch)return[];const lines=patch.replace(/\r\n/g,'\n').split('\n'),files=[];let current=null,pendingOld='',pendingNew=false;
@@ -43,7 +43,7 @@ function summary(result,failed){const box=document.createElement('div');box.clas
 function render(){const payload=unwrap(state.output),result=payload.result??payload,tool=payload.tool||state.input?.tool||'',failed=payload.status==='error'||payload.isError;const patch=extractDiff(result,state.input),files=splitFiles(patch),adds=files.reduce((n,f)=>n+f.adds,0),dels=files.reduce((n,f)=>n+f.dels,0);let title=failed?'Change failed':files.length?'Changes ready':'No changes';if(tool==='patch_preview'&&!failed)title=result?.valid===false?'Patch needs attention':'Patch ready';if(tool==='git_show'&&files.length)title='Revision changes';$('title').textContent=title;$('subtitle').textContent=files.length?(files.length===1?files[0].path:files.length+' files changed'):(result?.paths?.join(', ')||state.input?.path||'Nothing to review');$('adds').textContent='+'+adds;$('dels').textContent='−'+dels;$('body').replaceChildren();if(files.length)for(const file of files)$('body').append(fileNode(file,files.length===1));else $('body').append(summary(result,failed));resize()}
 function resize(){requestAnimationFrame(()=>window.openai?.notifyIntrinsicHeight?.(document.documentElement.scrollHeight))}
 $('toggle').onclick=()=>{state.expanded=!state.expanded;$('card').classList.toggle('open',state.expanded);$('toggle').setAttribute('aria-expanded',String(state.expanded));resize()};
-window.addEventListener('message',event=>{if(event.source!==window.parent)return;const m=event.data;if(!m||m.jsonrpc!=='2.0')return;if(m.method==='ui/notifications/tool-input')state.input=m.params||{};if(m.method==='ui/notifications/tool-result')state.output=m.params?.structuredContent||m.params||{};render()},{passive:true});
+window.addEventListener('message',event=>{if(event.source!==window.parent)return;const m=event.data;if(!m||m.jsonrpc!=='2.0')return;if(m.method==='ui/notifications/tool-input')state.input=m.params||{};if(m.method==='ui/notifications/tool-result')state.output=m.params||{};render()},{passive:true});
 window.addEventListener('openai:set_globals',event=>{const g=event.detail?.globals||event.detail||{};if(g.toolInput!==undefined)state.input=g.toolInput;if(g.toolOutput!==undefined)state.output=g.toolOutput;render()});
 state.input=window.openai?.toolInput||{};state.output=window.openai?.toolOutput||{};new ResizeObserver(resize).observe(document.body);render();
 </script></body></html>'''

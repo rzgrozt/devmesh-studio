@@ -10,14 +10,16 @@ from devmesh_studio.core.storage import Storage
 from .auth import authorization_server_metadata, create_auth_router, public_url
 from .mcp_http import create_mcp_router
 from .live_activity import create_live_activity_router
+from .output_optimizer import OutputOptimizer
 from .tool_registry import ToolRegistry
 from .tool_widget import TOOL_WIDGET_MIME, TOOL_WIDGET_URI
 
 storage = Storage()
 registry = ToolRegistry(storage)
+output_optimizer = OutputOptimizer()
 app = FastAPI(title="DevMesh Studio", version=__version__)
 app.include_router(create_auth_router(storage))
-app.include_router(create_mcp_router(storage, registry))
+app.include_router(create_mcp_router(storage, registry, output_optimizer))
 app.include_router(create_live_activity_router(registry.live_activity))
 
 
@@ -40,6 +42,7 @@ async def healthz():
 
 @app.on_event("shutdown")
 async def shutdown_runtime():
+    output_optimizer.close()
     # Stateful downstream MCPs (CUA, browser automation, etc.) may own child
     # processes and application state. Close those workers before the gateway
     # exits so restarts never leave orphaned runtimes behind.

@@ -15,7 +15,8 @@ from devmesh_studio.core.storage import Storage
 from .auth import protected_resource_metadata_url, verify_access
 from .auth import public_url
 from .live_widget import LIVE_WIDGET_HTML, LIVE_WIDGET_MIME, LIVE_WIDGET_URI, live_widget_resource
-from .tool_registry import ToolDispatchResult, ToolRegistry
+from .output_optimizer import OutputOptimizer
+from .tool_registry import REVIEW_WIDGET_TOOLS, ToolDispatchResult, ToolRegistry
 from .tool_widget import TOOL_WIDGET_HTML, TOOL_WIDGET_MIME, TOOL_WIDGET_URI, widget_resource
 
 MODERN_PROTOCOL = "2026-07-28"
@@ -56,8 +57,9 @@ def _estimated_tokens(value: Any) -> int:
     return math.ceil(len(raw.encode("utf-8")) / 4) if raw else 0
 
 
-def create_mcp_router(storage: Storage, registry: ToolRegistry) -> APIRouter:
+def create_mcp_router(storage: Storage, registry: ToolRegistry, optimizer: OutputOptimizer | None = None) -> APIRouter:
     router = APIRouter()
+    optimizer = optimizer or OutputOptimizer()
 
     def unauthorized():
         return JSONResponse(
@@ -168,6 +170,7 @@ def create_mcp_router(storage: Storage, registry: ToolRegistry) -> APIRouter:
             arguments = params.get("arguments") or {}
             started = time.perf_counter()
             try:
+                registry.ctx.clear_last_call()
                 dispatched = await registry.dispatch(claims.get("sub", "chatgpt"), name, arguments)
                 private_meta: dict[str, Any] = {}
                 if isinstance(dispatched, ToolDispatchResult):
@@ -176,12 +179,19 @@ def create_mcp_router(storage: Storage, registry: ToolRegistry) -> APIRouter:
                 else:
                     data = dispatched
                 duration_ms = round((time.perf_counter() - started) * 1000)
-                usage = {"input_tokens": _estimated_tokens(arguments), "output_tokens": _estimated_tokens(data), "estimated": True}
+                optimized = optimizer.optimize(name, data, registry.ctx.last_call_id())
+                usage = {"input_tokens": _estimated_tokens(arguments), "output_tokens": _estimated_tokens(optimized.result), "estimated": True}
                 result: dict[str, Any] = {
-                    "content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False, indent=2, default=str)}],
-                    "structuredContent": {"tool": name, "result": data, "status": "ok", "duration_ms": duration_ms, "usage": usage},
+                    "content": [{"type": "text", "text": optimized.text}],
+                    "structuredContent": {"tool": name, "result": optimized.result, "status": "ok", "duration_ms": duration_ms, "usage": usage},
                     "isError": False,
                 }
+                if optimized.optimized and name in REVIEW_WIDGET_TOOLS:
+                    # MCP _meta is available to the review UI but excluded from
+                    # the model transcript. Keep its full diff intact.
+                    private_meta = {**private_meta, "devmeshFullResult": {
+                        "tool": name, "result": data, "status": "ok",
+                    }}
                 if private_meta:
                     result["_meta"] = private_meta
                 if modern:
