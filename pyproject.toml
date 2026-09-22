@@ -20,6 +20,7 @@ dependencies = [
   "keyring>=25,<26",
   "mcp>=2.0,<3",
   "psutil>=7,<8",
+  "headroom-ai==0.38.0",
 ]
 
 [project.optional-dependencies]
