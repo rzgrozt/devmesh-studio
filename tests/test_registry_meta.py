@@ -6,7 +6,7 @@ from devmesh_studio.runtime.tool_registry import REVIEW_WIDGET_TOOLS, TOOL_DEFS,
 
 def test_tool_registry_is_unique_and_complete():
     names=[x["name"] for x in TOOL_DEFS]
-    assert len(names)==55
+    assert len(names)==56
     assert len(names)==len(set(names))
     for item in TOOL_DEFS:
         assert item["description"]
@@ -14,7 +14,7 @@ def test_tool_registry_is_unique_and_complete():
         assert item["outputSchema"]["type"]=="object"
         assert set(item["outputSchema"]["required"]) == {"tool", "result", "status", "duration_ms", "usage"}
         assert "annotations" in item
-        assert ("_meta" in item) is (item["name"] in REVIEW_WIDGET_TOOLS)
+        assert ("_meta" in item) is (item["name"] in REVIEW_WIDGET_TOOLS | {"live_activity_open"})
 
 
 def test_common_output_schema_accepts_every_result_state():

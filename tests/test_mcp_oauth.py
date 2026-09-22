@@ -49,10 +49,10 @@ def test_oauth_pkce_and_mcp_tool_list(tmp_path, monkeypatch):
     tools=client.post("/mcp",headers=headers,json={"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}).json()["result"]["tools"]
     names={t["name"] for t in tools}
     assert {"fs_read","fs_edit","terminal_exec","git_status","agent_delegate","mcp_call","approval_list"}.issubset(names)
-    assert len(tools) == 55
+    assert len(tools) == 56
     widget_tools={t["name"] for t in tools if "_meta" in t}
-    assert widget_tools == {"fs_write","fs_edit","patch_preview","patch_apply","patch_revert","git_diff","git_show"}
-    assert all(t["_meta"]["ui"]["resourceUri"] == "ui://devmesh/change-review-v3.html" for t in tools if "_meta" in t)
+    assert widget_tools == {"fs_write","fs_edit","patch_preview","patch_apply","patch_revert","git_diff","git_show","live_activity_open"}
+    assert next(t for t in tools if t["name"] == "live_activity_open")["_meta"]["ui"]["resourceUri"] == "ui://devmesh/live-activity-v1.html"
     assert all(t["outputSchema"]["type"] == "object" for t in tools)
 
     repo_dir=tmp_path/"repo"; repo_dir.mkdir(); (repo_dir/"hello.txt").write_text("hello world\n",encoding="utf-8")
@@ -112,11 +112,23 @@ def test_modern_2026_discovery_and_tool_results(tmp_path, monkeypatch):
 
     listed=client.post("/mcp",headers=headers,json={"jsonrpc":"2.0","id":"d2","method":"tools/list","params":{"_meta":meta}}).json()["result"]
     assert listed["resultType"] == "complete"
-    assert len(listed["tools"]) == 55
+    assert len(listed["tools"]) == 56
     resources=client.post("/mcp",headers=headers,json={"jsonrpc":"2.0","id":"d2r","method":"resources/list","params":{"_meta":meta}}).json()["result"]
     assert resources["resources"][0]["mimeType"] == "text/html;profile=mcp-app"
+    assert {resource["uri"] for resource in resources["resources"]} == {"ui://devmesh/change-review-v3.html", "ui://devmesh/live-activity-v1.html"}
     widget=client.post("/mcp",headers=headers,json={"jsonrpc":"2.0","id":"d2w","method":"resources/read","params":{"uri":"ui://devmesh/change-review-v3.html","_meta":meta}}).json()["result"]
     assert "Changes ready" in widget["contents"][0]["text"]
+    live_widget=client.post("/mcp",headers=headers,json={"jsonrpc":"2.0","id":"d2l","method":"resources/read","params":{"uri":"ui://devmesh/live-activity-v1.html","_meta":meta}}).json()["result"]
+    live_content = live_widget["contents"][0]
+    assert live_content["mimeType"] == "text/html;profile=mcp-app"
+    assert "DevMesh Live" in live_content["text"]
+    assert live_content["_meta"]["ui"]["csp"]["connectDomains"] == ["http://127.0.0.1:8000"]
+
+    opened=client.post("/mcp",headers=headers,json={"jsonrpc":"2.0","id":"d2o","method":"tools/call","params":{"name":"live_activity_open","arguments":{"session":"cua-smoke-test"},"_meta":meta}}).json()["result"]
+    capability = opened["_meta"]["devmeshLive"]["capability"]
+    assert opened["structuredContent"]["result"] == {"status":"ready","server":"downstream MCP"}
+    assert capability not in opened["content"][0]["text"]
+    assert opened["_meta"]["devmeshLive"]["streamUrl"] == "http://127.0.0.1:8000/live/activity/stream"
 
     repo_dir=tmp_path/"modern-repo"; repo_dir.mkdir(); (repo_dir/"hello.txt").write_text("modern mcp\n",encoding="utf-8")
     repo=storage.add_repository(repo_dir)
