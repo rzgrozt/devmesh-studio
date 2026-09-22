@@ -18,7 +18,7 @@ def main() -> None:
     window = MainWindow()
     _ = app.aboutToQuit.connect(window.shutdown_runtime)
     window.show()
-    QTimer.singleShot(0, window.start_local_runtime_on_launch)
+    QTimer.singleShot(0, window.start_runtime_on_launch)
     raise SystemExit(app.exec())
 
 

@@ -127,18 +127,18 @@ class MainWindow(QMainWindow):
         self.refresh_all()
         self.refresh_runtime_badge()
 
-    def start_local_runtime_on_launch(self):
-        """Bring up the app-owned gateway without starting a public tunnel."""
+    def start_runtime_on_launch(self):
+        """Start the gateway and honor the saved auto-tunnel preference."""
         def launch():
             with self._runtime_lifecycle_lock:
                 if self._shutdown_done:
                     return
                 try:
-                    self.supervisor.start(use_tunnel=False)
+                    self.supervisor.start()
                 except Exception as exc:
-                    self.events.put(f"Local runtime did not start: {exc}")
+                    self.events.put(f"Runtime did not start: {exc}")
 
-        threading.Thread(target=launch, name="devmesh-local-runtime-start", daemon=True).start()
+        threading.Thread(target=launch, name="devmesh-runtime-start", daemon=True).start()
 
     def refresh_runtime_badge(self):
         status = self.supervisor.status()
