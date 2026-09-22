@@ -92,7 +92,16 @@ class _PersistentMCPWorker:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[Any] = loop.create_future()
         await self._queue.put((operation, payload, future))
-        return await future
+        task = self._task
+        if task is None:
+            raise RuntimeError("downstream MCP worker failed to start")
+        done, _ = await asyncio.wait({future, task}, return_when=asyncio.FIRST_COMPLETED)
+        if future in done:
+            return future.result()
+        if not future.done():
+            future.cancel()
+        detail = f": {self._fatal_error}" if self._fatal_error else ""
+        raise RuntimeError(f"downstream MCP worker stopped{detail}")
 
     async def close(self) -> None:
         task = self._task
@@ -109,7 +118,7 @@ class _PersistentMCPWorker:
         future: asyncio.Future[Any] = loop.create_future()
         await self._queue.put(("__close__", (), future))
         with suppress(asyncio.CancelledError, Exception):
-            await future
+            await asyncio.wait({future, task}, return_when=asyncio.FIRST_COMPLETED)
         with suppress(asyncio.CancelledError, Exception):
             await task
         self._closed = True
