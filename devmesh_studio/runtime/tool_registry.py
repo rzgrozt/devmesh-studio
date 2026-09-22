@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from devmesh_studio.core.permissions import ApprovalRequired
@@ -14,6 +15,9 @@ from devmesh_studio.tools.git import GitTools
 from devmesh_studio.tools.skills import SkillTools
 from devmesh_studio.tools.tasks import TaskTools
 from devmesh_studio.tools.terminal import TerminalTools
+from .auth import public_url
+from .live_activity import ActivityScope, LiveActivity
+from .live_widget import LIVE_WIDGET_URI
 from .tool_widget import TOOL_WIDGET_URI
 
 
@@ -35,6 +39,12 @@ REVIEW_WIDGET_TOOLS = {
     "git_diff",
     "git_show",
 }
+
+
+@dataclass
+class ToolDispatchResult:
+    data: dict[str, Any]
+    private_meta: dict[str, Any]
 
 
 def obj(properties: dict[str, Any] | None = None, required: list[str] | None = None) -> dict[str, Any]:
@@ -91,6 +101,13 @@ def tool(name: str, description: str, schema: dict[str, Any], annotations: dict[
             "openai/outputTemplate": TOOL_WIDGET_URI,
             "openai/toolInvocation/invoking": "DevMesh is working…",
             "openai/toolInvocation/invoked": "DevMesh finished",
+        }
+    elif name == "live_activity_open":
+        definition["_meta"] = {
+            "ui": {"resourceUri": LIVE_WIDGET_URI},
+            "openai/outputTemplate": LIVE_WIDGET_URI,
+            "openai/toolInvocation/invoking": "Opening DevMesh Live…",
+            "openai/toolInvocation/invoked": "DevMesh Live is ready",
         }
     return definition
 
@@ -156,6 +173,7 @@ TOOL_DEFS = [
     tool("mcp_list", "List downstream MCP servers explicitly registered in DevMesh. Secret environment values are never returned.", obj(), OPEN_RO),
     tool("mcp_tools", "Connect to a registered downstream MCP and list its tool schemas and allowlist state.", obj({"server_id":{"oneOf":[{"type":"integer"},{"type":"string"}]}}, ["server_id"]), OPEN_RO),
     tool("mcp_call", "Invoke an explicitly allowlisted tool on a registered downstream MCP server.", obj({"repo_id":{"type":"integer"},"server_id":{"oneOf":[{"type":"integer"},{"type":"string"}]},"tool_name":{"type":"string"},"arguments":{"type":"object","additionalProperties":True}}, ["server_id","tool_name","arguments"]), OPEN_DANGER),
+    tool("live_activity_open", "Open one read-only live activity console scoped to this actor and optional repository, downstream MCP server, and public session label.", obj({"repo_id":{"type":"integer"},"server_id":{"oneOf":[{"type":"integer"},{"type":"string"}]},"session":{"type":"string","maxLength":80}}), OPEN_RO),
 
     tool("history_calls", "Inspect recent DevMesh tool-call history.", obj({"repo_id":{"type":"integer"},"limit":{"type":"integer","default":100,"maximum":500}}), RO),
     tool("history_patches", "Inspect recorded DevMesh patch history.", obj({"repo_id":{"type":"integer"},"limit":{"type":"integer","default":100,"maximum":500}}), RO),
@@ -164,7 +182,7 @@ TOOL_DEFS = [
 
 
 class ToolRegistry:
-    def __init__(self, storage: Storage):
+    def __init__(self, storage: Storage, live_activity: LiveActivity | None = None):
         self.storage = storage
         self.ctx = ToolContext(storage)
         self.fs = FilesystemTools(self.ctx)
@@ -174,7 +192,8 @@ class ToolRegistry:
         self.code = CodeIntelTools(self.ctx)
         self.skills = SkillTools(self.ctx)
         self.agents = AgentTools(self.ctx)
-        self.mcp = DownstreamMCPTools(self.ctx)
+        self.live_activity = live_activity or LiveActivity()
+        self.mcp = DownstreamMCPTools(self.ctx, self.live_activity)
 
     def definitions(self) -> list[dict[str, Any]]:
         return TOOL_DEFS
@@ -183,6 +202,40 @@ class ToolRegistry:
         rid = a.get("repo_id")
         fn: Callable[..., Any] | None = None
         kwargs: dict[str, Any] = dict(a)
+
+        if name == "live_activity_open":
+            repo_id = a.get("repo_id")
+            requested_server = a.get("server_id")
+            server = None
+            if requested_server is not None:
+                server = self.storage.get_mcp_server(requested_server)
+                if not server or not server["enabled"]:
+                    raise KeyError(f"unknown/disabled MCP server: {requested_server}")
+            session = a.get("session")
+            if session is not None:
+                session = str(session).replace("\r", " ").replace("\n", " ").strip()[:80] or None
+            scope = ActivityScope(
+                actor=actor, repo_id=repo_id,
+                server_id=int(server["id"]) if server else None,
+                session=session,
+            )
+            self.ctx.clear_last_call()
+            record_args = {"repo_id": repo_id, "server_id": requested_server, "session": session}
+            with self.ctx.record(actor, repo_id, "live_activity_open", "live_activity", record_args):
+                capability, expires_in = await self.live_activity.mint(scope)
+            origin = public_url(self.storage)
+            server_name = server["name"] if server else "downstream MCP"
+            return ToolDispatchResult(
+                data={"status": "ready", "server": server_name},
+                private_meta={"devmeshLive": {
+                    "capability": capability,
+                    "expiresIn": expires_in,
+                    "streamUrl": origin + "/live/activity/stream",
+                    "previewBaseUrl": origin + "/live/activity/preview",
+                    "serverName": server_name,
+                    "session": session,
+                }},
+            )
 
         if name == "repo_list":
             return {"repositories": [self.ctx.repos.info(r["id"]) for r in self.storage.list_repositories(enabled_only=True)]}
