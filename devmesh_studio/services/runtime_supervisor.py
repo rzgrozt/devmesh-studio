@@ -750,7 +750,7 @@ class RuntimeSupervisor:
             )
             self._remember_gateway_pid()
 
-            if self.tunnel_mode == "tailscale" and use_tunnel is not False:
+            if self.tunnel_mode == "tailscale":
                 public = (
                     self.tailscale_public_url()
                 )
